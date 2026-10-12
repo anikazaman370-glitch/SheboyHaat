@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { api } from "./api";
-import { Routes, Route, Link, NavLink, useNavigate, useLocation } from "react-router-dom";
+import { Routes, Route, Link, NavLink, useNavigate, useLocation, Navigate } from "react-router-dom";
+
+const homeFor = (role) => role === "admin" ? "/admin" : role === "worker" ? "/worker-dashboard" : "/bookings";
 
 const services = [
   { id:"plumbing", icon:"🔧", name:"Plumbing", bn:"প্লাম্বিং", desc:"Leaks, pipes, taps & bathroom repairs", price:"৳500+" },
@@ -40,6 +42,14 @@ function App(){
   const navigate = useNavigate();
   const logout = () => { setUser(null); localStorage.removeItem("sheboyhaat_user"); localStorage.removeItem("sheboyhaat_token"); navigate("/"); };
 
+  useEffect(() => {
+    const token = localStorage.getItem("sheboyhaat_token");
+    if (!token) { localStorage.removeItem("sheboyhaat_user"); setUser(null); return; }
+    api("/auth/me")
+      .then(d => { setUser(d.user); localStorage.setItem("sheboyhaat_user", JSON.stringify(d.user)); })
+      .catch(() => { setUser(null); localStorage.removeItem("sheboyhaat_user"); localStorage.removeItem("sheboyhaat_token"); });
+  }, []);
+
   return <div className="app">
     <Header lang={lang} setLang={setLang} user={user} logout={logout}/>
     <Routes>
@@ -48,16 +58,23 @@ function App(){
       <Route path="/workers" element={<Workers/>}/>
       <Route path="/worker/:id" element={<WorkerDetails user={user} bookings={bookings} saveBookings={saveBookings}/>}/>
       <Route path="/book/:workerId" element={<Booking user={user} bookings={bookings} saveBookings={saveBookings}/>}/>
-      <Route path="/bookings" element={<Bookings bookings={bookings} user={user}/>}/>
+      <Route path="/bookings" element={<RequireAuth user={user}><Bookings bookings={bookings} user={user}/></RequireAuth>}/>
       <Route path="/login" element={<Login login={login}/>}/>
       <Route path="/register" element={<Register login={login}/>}/>
-      <Route path="/worker-dashboard" element={<WorkerDashboard bookings={bookings} saveBookings={saveBookings}/>}/>
-      <Route path="/admin" element={<Admin bookings={bookings} saveBookings={saveBookings}/>}/>
-      <Route path="/profile" element={<Profile user={user} logout={logout}/>}/>
+      <Route path="/worker-dashboard" element={<RequireAuth user={user} role="worker"><WorkerDashboard bookings={bookings} saveBookings={saveBookings}/></RequireAuth>}/>
+      <Route path="/admin" element={<RequireAuth user={user} role="admin"><Admin bookings={bookings} saveBookings={saveBookings}/></RequireAuth>}/>
+      <Route path="/profile" element={<RequireAuth user={user}><Profile user={user} logout={logout}/></RequireAuth>}/>
       <Route path="*" element={<NotFound/>}/>
     </Routes>
     <Footer/>
   </div>
+}
+
+function RequireAuth({user,role,children}){
+  const location = useLocation();
+  if(!user) return <Navigate to="/login" replace state={{from:location.pathname}}/>;
+  if(role && user.role!==role) return <Navigate to={homeFor(user.role)} replace/>;
+  return children;
 }
 
 function Header({lang,setLang,user,logout}){
@@ -75,6 +92,7 @@ function Header({lang,setLang,user,logout}){
       <div className="nav-actions">
         <button className="lang-btn" onClick={()=>setLang(lang==="EN"?"বাংলা":"EN")}>{lang==="EN"?"বাংলা":"EN"}</button>
         {user ? <div className="user-menu">
+          <Link to={homeFor(user.role)} className="text-btn">Dashboard</Link>
           <Link to="/profile" className="avatar small">{user.name?.slice(0,1) || "U"}</Link>
           <button className="text-btn" onClick={logout}>Logout</button>
         </div> : <><Link to="/login" className="login-link">Log in</Link><Link to="/register" className="btn btn-primary btn-sm">Get Started</Link></>}
@@ -242,15 +260,15 @@ function Status({s}){return <span className={"status "+s.toLowerCase()}>{s}</spa
 
 function Login({login}){
   const navigate=useNavigate(); const [email,setEmail]=useState(""); const [password,setPassword]=useState("");
-  const submit=async e=>{e.preventDefault(); try { const d=await api("/auth/login",{method:"POST",body:JSON.stringify({email,password})}); if(d.token)localStorage.setItem("sheboyhaat_token",d.token); login(d.user); } catch(err) { alert(err.message+". If this is your first visit, register a new account."); return; } navigate("/");};
-  return <main className="auth-page"><div className="auth-card"><Link to="/" className="logo center-logo"><span className="logo-mark">শ</span><span>Sheboy<span>Haat</span></span></Link><h1>Welcome back</h1><p>Log in to manage your bookings.</p><form onSubmit={submit}><label>Email<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••"/></label><button className="btn btn-primary btn-lg full">Log in</button></form><div className="divider">or</div><Link to="/register" className="btn btn-outline full">Create an account</Link><small className="demo-note">Demo mode: this frontend stores login locally until the backend is connected.</small></div></main>
+  const submit=async e=>{e.preventDefault(); try { const d=await api("/auth/login",{method:"POST",body:JSON.stringify({email,password})}); if(d.token)localStorage.setItem("sheboyhaat_token",d.token); login(d.user); navigate(homeFor(d.user.role)); } catch(err) { alert(err.message+". If this is your first visit, register a new account."); return; }};
+  return <main className="auth-page"><div className="auth-card"><Link to="/" className="logo center-logo"><span className="logo-mark">শ</span><span>Sheboy<span>Haat</span></span></Link><h1>Welcome back</h1><p>Log in to manage your bookings.</p><form onSubmit={submit}><label>Email<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••"/></label><button className="btn btn-primary btn-lg full">Log in</button></form><div className="divider">or</div><Link to="/register" className="btn btn-outline full">Create an account</Link><small className="demo-note">Your session is verified against the SheboyHaat API.</small></div></main>
 }
 
 function Register({login}){
   const navigate=useNavigate();
   const [role,setRole]=useState("customer"),[name,setName]=useState(""),[email,setEmail]=useState(""),[password,setPassword]=useState("");
   const [phone,setPhone]=useState(""),[service,setService]=useState(""),[area,setArea]=useState(""),[experience,setExperience]=useState(""),[price,setPrice]=useState("500"),[nid,setNid]=useState(null),[busy,setBusy]=useState(false);
-  const submit=async e=>{e.preventDefault();setBusy(true);try{const d=await api("/auth/register",{method:"POST",body:JSON.stringify({name,email,password,role,phone,service,area,experience,price,nidFileName:nid?.name||"",nidData:nid?await fileToDataUrl(nid):""})});if(d.token)localStorage.setItem("sheboyhaat_token",d.token);login(d.user);navigate(role==="worker"?"/worker-dashboard":"/");}catch(err){alert(err.message);}finally{setBusy(false);}};
+  const submit=async e=>{e.preventDefault();setBusy(true);try{const d=await api("/auth/register",{method:"POST",body:JSON.stringify({name,email,password,role,phone,service,area,experience,price,nidFileName:nid?.name||"",nidData:nid?await fileToDataUrl(nid):""})});if(d.token)localStorage.setItem("sheboyhaat_token",d.token);login(d.user);navigate(homeFor(role));}catch(err){alert(err.message);}finally{setBusy(false);}};
   return <main className="auth-page"><div className="auth-card wide"><Link to="/" className="logo center-logo"><span className="logo-mark">শ</span><span>Sheboy<span>Haat</span></span></Link><h1>Create your account</h1><p>Join Bangladesh's trusted local service platform.</p><div className="role-toggle"><button type="button" className={role==="customer"?"active":""} onClick={()=>setRole("customer")}>Customer</button><button type="button" className={role==="worker"?"active":""} onClick={()=>setRole("worker")}>Service Worker</button></div>
   <form onSubmit={submit}><label>Full name<input required value={name} onChange={e=>setName(e.target.value)} placeholder="Your full name"/></label><label>Email<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required type="password" minLength="6" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 6 characters"/></label>
   {role==="worker"&&<><label>Phone number<input required value={phone} onChange={e=>setPhone(e.target.value)} placeholder="01XXXXXXXXX"/></label><label>Service category<input required value={service} onChange={e=>setService(e.target.value)} placeholder="e.g. Plumber, Electrician"/></label><label>Service area<input required value={area} onChange={e=>setArea(e.target.value)} placeholder="e.g. Mirpur, Dhaka"/></label><label>Years of experience<input required type="number" min="0" value={experience} onChange={e=>setExperience(e.target.value)}/></label><label>Starting price (BDT)<input required type="number" min="0" value={price} onChange={e=>setPrice(e.target.value)}/></label><label>Upload NID card (image or PDF)<input required type="file" accept="image/*,application/pdf" onChange={e=>setNid(e.target.files?.[0]||null)}/></label><div className="notice">Your profile will stay hidden until an admin reviews your NID and verifies your details.</div></>}
@@ -276,15 +294,15 @@ function Admin({bookings,saveBookings}){
   const [pending,setPending]=useState([]);
   const [dbData,setDbData]=useState(null);
   const [error,setError]=useState("");
-  const load=()=>Promise.all([api("/admin/overview"),api("/admin/workers"),api("/admin/database")]).then(([o,w,d])=>{setOverview(o);setPending((w.workers||[]).filter(x=>!x.verified));setDbData(d);setError("");}).catch(e=>setError(e.message+". Please log in with the admin account to load live data."));
+  const load=()=>Promise.all([api("/admin/overview"),api("/admin/workers"),api("/admin/database")]).then(([o,w,d])=>{setOverview(o);setPending((w.workers||[]).filter(x=>!x.verified));setDbData(d);setError("");}).catch(e=>setError(e.message));
   useEffect(()=>{load();},[]);
   const verify=async(id)=>{try{await api(`/admin/workers/${id}/verify`,{method:"PATCH"});await load();}catch(e){setError(e.message);}};
   return <main className="page"><div className="container"><div className="dashboard-head"><div><span className="eyebrow">ADMIN PANEL</span><h1>Platform overview</h1><p>Manage verification, disputes and platform activity.</p></div><span className="admin-badge">ADMIN</span></div>
-    {error&&<div className="notice">{error}<br/>Demo admin: <b>admin@sheboyhaat.local</b> · Password: <b>Admin123!</b></div>}
+    {error&&<div className="notice">{error} Only platform administrators can manage this panel.</div>}
     <div className="dash-stats"><Stat n={overview.workers} label="Workers"/><Stat n={overview.pendingVerification} label="Pending verification"/><Stat n={overview.bookings} label="Total bookings"/><Stat n={overview.openReports} label="Open reports"/></div>
     <div className="dashboard-grid"><section className="panel"><div className="panel-title"><h2>Worker verification</h2><span>{pending.length} pending</span></div>{pending.length?pending.map(w=><div className="request" key={w.id}><div className="avatar mini">{w.avatar}</div><div><b>{w.name}</b><span>{w.service} · {w.area}</span><small>{w.phone||"No phone"} · {w.experience||"Experience not given"} years · {w.nidFileName||"NID not uploaded"}</small></div><button onClick={()=>verify(w.id)} className="btn btn-primary btn-sm">Verify</button></div>):<div className="empty small-empty"><div>✓</div><p>No pending workers.</p></div>}</section>
     <section className="panel"><div className="panel-title"><h2>Quick actions</h2></div><div className="admin-actions"><button onClick={()=>api("/admin/reports").then(d=>alert(`${(d.reports||[]).length} report(s) found`)).catch(e=>alert(e.message))}>Review reports</button><button onClick={()=>alert("Map integration is a planned feature for a future version.")}>Open map dashboard</button><button onClick={()=>alert("Platform settings will be added in a future version.")}>Platform settings</button><button onClick={()=>alert(`Workers: ${overview.workers} · Bookings: ${overview.bookings}`)}>Activity analytics</button></div></section></div>
-    <section className="panel" style={{marginTop:24}}><div className="panel-title"><h2>Database records</h2><button className="btn btn-outline btn-sm" onClick={load}>Refresh data</button></div>{dbData?<><p>Live records from the local SQLite database. NID file contents are intentionally not shown in this overview.</p>{Object.entries(dbData).map(([table,rows])=><details key={table} style={{margin:"12px 0"}}><summary style={{cursor:"pointer",fontWeight:700,textTransform:"capitalize"}}>{table} ({rows.length})</summary><div style={{overflowX:"auto",marginTop:10}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}><tbody>{rows.length ? <><thead><tr>{Object.keys(rows[0]).map(k=><th key={k} style={{textAlign:"left",padding:8,borderBottom:"1px solid #ddd"}}>{k}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={i}>{Object.values(row).map((v,j)=><td key={j} style={{padding:8,borderBottom:"1px solid #eee"}}>{String(v??"")}</td>)}</tr>)}</tbody></> : <tbody><tr><td>No records yet.</td></tr></tbody>}}</tbody></table></div></details>)}</>:<p>Database records could not be loaded. Check admin login and backend connection.</p>}</section>
+    <section className="panel" style={{marginTop:24}}><div className="panel-title"><h2>Database records</h2><button className="btn btn-outline btn-sm" onClick={load}>Refresh data</button></div>{dbData?<><p>Live records from the Neon PostgreSQL database. NID file contents are intentionally not shown in this overview.</p>{Object.entries(dbData).map(([table,rows])=><details key={table} style={{margin:"12px 0"}}><summary style={{cursor:"pointer",fontWeight:700,textTransform:"capitalize"}}>{table} ({rows.length})</summary><div style={{overflowX:"auto",marginTop:10}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>{rows.length ? <><thead><tr>{Object.keys(rows[0]).map(k=><th key={k} style={{textAlign:"left",padding:8,borderBottom:"1px solid #ddd"}}>{k}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={i}>{Object.values(row).map((v,j)=><td key={j} style={{padding:8,borderBottom:"1px solid #eee"}}>{String(v??"")}</td>)}</tr>)}</tbody></> : <tbody><tr><td>No records yet.</td></tr></tbody>}</table></div></details>)}</>:<p>Database records could not be loaded. Check admin login and backend connection.</p>}</section>
   </div></main>
 }
 

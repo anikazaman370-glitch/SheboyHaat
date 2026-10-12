@@ -27,6 +27,17 @@ if not exist "frontend\node_modules" (
   popd
 )
 if not exist "backend\.env" copy "backend\.env.example" "backend\.env" >nul
+pushd backend
+findstr /b /c:"DATABASE_URL=\"postgresql" ".env" >nul
+if errorlevel 1 (
+  echo.
+  echo Set DATABASE_URL in backend\.env to your Neon PostgreSQL connection string, then run this file again.
+  popd & pause & exit /b 1
+)
+echo Syncing database schema and seed data...
+call npm run db:setup
+if errorlevel 1 (popd & echo Database setup failed. Check DATABASE_URL in backend\.env & pause & exit /b 1)
+popd
 echo.
 echo Starting backend and frontend in separate windows...
 start "SheboyHaat Backend" cmd /k "cd /d ""%~dp0backend"" && npm run dev"
