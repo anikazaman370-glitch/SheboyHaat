@@ -42,6 +42,12 @@ app.use((req, _res, next) => {
 const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 function tokenFor(u) { return jwt.sign({ id: u.id, email: u.email, role: u.role }, SECRET, { expiresIn: ACCESS_TOKEN_TTL }); }
 function auth(req, res, next) { const h = req.headers.authorization || ''; try { if (!h.startsWith('Bearer ')) throw Error(); req.user = jwt.verify(h.slice(7), SECRET); next(); } catch { return res.status(401).json({ message: 'Please log in to continue.' }); } }
+function optionalAuth(req, res, next) {
+  const h = req.headers.authorization || '';
+  if (!h) { req.user = null; return next(); }
+  try { req.user = jwt.verify(h.replace(/^Bearer\s+/i, ''), SECRET); next(); }
+  catch { return res.status(401).json({ message: 'Session expired.' }); }
+}
 
 const hashToken = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
 function safeUser(u) { return { id: u.id, name: u.name, email: u.email, role: u.role }; }
@@ -59,13 +65,25 @@ async function startSession(user, res, status = 200) {
 }
 function admin(req, res, next) { if (req.user?.role !== 'admin') return res.status(403).json({ message: 'Admin access required.' }); next(); }
 
-function workerOut(w) {
-  return {
+function workerOut(w, opts = {}) {
+  const out = {
     id: w.id, userId: w.userId, name: w.name, service: w.service, area: w.area,
     rating: Number(w.rating), reviews: w.reviewCount, price: w.price, verified: !!w.verified,
     avatar: w.avatar || w.name.split(' ').map(x => x[0]).join('').slice(0, 2),
-    jobs: w.jobs, phone: w.phone || '', experience: w.experience || '',
-    nidFileName: w.nidFileName || '', bio: w.bio || ''
+    jobs: w.jobs
+  };
+  if (opts.full) {
+    out.phone = w.phone || '';
+    out.experience = w.experience || '';
+    out.nidFileName = w.nidFileName || '';
+    out.bio = w.bio || '';
+  }
+  return out;
+}
+function workerLimitedOut(w) {
+  return {
+    id: w.id, name: w.name, service: w.service, verified: !!w.verified,
+    avatar: w.avatar || w.name.split(' ').map(x => x[0]).join('').slice(0, 2)
   };
 }
 function bookingOut(b) {
@@ -76,20 +94,22 @@ app.get('/api/health', (_q, r) => r.json({ ok: true, service: 'SheboyHaat API', 
 
 app.get('/api/services', (_q, r) => r.json({ services: [{ id: 'plumbing', name: 'Plumbing' }, { id: 'electrical', name: 'Electrical' }, { id: 'cleaning', name: 'Cleaning' }, { id: 'ac', name: 'AC Service' }, { id: 'appliance', name: 'Appliance Repair' }, { id: 'painting', name: 'Painting' }] }));
 
-app.get('/api/workers', ah(async (q, r) => {
+app.get('/api/workers', optionalAuth, ah(async (q, r) => {
   const AND = [];
   if (q.query.service) AND.push({ service: { contains: String(q.query.service), mode: 'insensitive' } });
   if (q.query.area) AND.push({ area: { equals: String(q.query.area), mode: 'insensitive' } });
   if (q.query.search) AND.push({ OR: [{ name: { contains: String(q.query.search), mode: 'insensitive' } }, { service: { contains: String(q.query.search), mode: 'insensitive' } }] });
   const workers = await prisma.worker.findMany({ where: { verified: true, ...(AND.length ? { AND } : {}) }, orderBy: { rating: 'desc' } });
-  r.json({ workers: workers.map(workerOut) });
+  const full = !!q.user;
+  r.json({ workers: workers.map(w => full ? workerOut(w) : workerLimitedOut(w)), locked: !full });
 }));
 
-app.get('/api/workers/:id', ah(async (q, r) => {
+app.get('/api/workers/:id', optionalAuth, ah(async (q, r) => {
   const w = await prisma.worker.findUnique({ where: { id: Number(q.params.id) } });
   if (!w) return r.status(404).json({ message: 'Worker not found.' });
+  if (!q.user) return r.json({ worker: workerLimitedOut(w), bio: '', reviews: [], locked: true });
   const reviews = await prisma.review.findMany({ where: { workerId: w.id }, orderBy: { id: 'desc' }, include: { customer: { select: { name: true } } } });
-  r.json({ worker: workerOut(w), bio: w.bio, reviews: reviews.map(rv => ({ rating: rv.rating, comment: rv.comment, created_at: rv.createdAt, customerName: rv.customer.name })) });
+  r.json({ worker: workerOut(w, { full: true }), bio: w.bio, reviews: reviews.map(rv => ({ rating: rv.rating, comment: rv.comment, created_at: rv.createdAt, customerName: rv.customer.name })), locked: false });
 }));
 
 app.post('/api/auth/register', ah(async (q, r) => {
@@ -201,7 +221,7 @@ app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
 
 app.get('/api/admin/workers', auth, admin, ah(async (_q, r) => {
   const workers = await prisma.worker.findMany({ orderBy: [{ verified: 'asc' }, { id: 'desc' }] });
-  r.json({ workers: workers.map(workerOut) });
+  r.json({ workers: workers.map(w => workerOut(w, { full: true })) });
 }));
 
 app.patch('/api/admin/workers/:id/verify', auth, admin, ah(async (q, r) => {

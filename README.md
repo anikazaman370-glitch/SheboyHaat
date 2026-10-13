@@ -65,6 +65,12 @@ Relevant env vars in `backend/.env`:
 
 Auth endpoints: `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/refresh`, `POST /api/auth/logout`, `GET /api/auth/me`.
 
+## Worker profile visibility
+Worker details are gated behind login, both in the listing (`GET /api/workers`) and on the profile (`GET /api/workers/:id`).
+Logged-in users receive full details (area, price, rating, reviews, experience, phone, bio); guests receive only the worker's
+**name, category and verification status**, together with a `locked: true` flag. Contact/NID fields are never exposed to guests,
+and the admin listing always requests the full record.
+
 ## Notes
 - For database-backed bookings, register/login first and keep both terminals running.
 - The frontend keeps sample fallback data for demos if the API is unavailable.

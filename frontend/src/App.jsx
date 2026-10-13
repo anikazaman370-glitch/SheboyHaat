@@ -86,9 +86,9 @@ function App(){
   return <div className="app">
     <Header lang={lang} setLang={setLang} user={user} logout={logout}/>
     <Routes>
-      <Route path="/" element={<Home lang={lang}/>}/>
+      <Route path="/" element={<Home lang={lang} user={user}/>}/>
       <Route path="/services" element={<Services lang={lang}/>}/>
-      <Route path="/workers" element={<Workers/>}/>
+      <Route path="/workers" element={<Workers user={user}/>}/>
       <Route path="/worker/:id" element={<WorkerDetails user={user} bookings={bookings} saveBookings={saveBookings}/>}/>
       <Route path="/book/:workerId" element={<Booking user={user} bookings={bookings} saveBookings={saveBookings}/>}/>
       <Route path="/bookings" element={<RequireAuth user={user} ready={authReady}><Bookings bookings={bookings} user={user}/></RequireAuth>}/>
@@ -135,7 +135,7 @@ function Header({lang,setLang,user,logout}){
   </header>
 }
 
-function Home({lang}){
+function Home({lang,user}){
   const navigate=useNavigate();
   return <>
     <section className="hero">
@@ -193,7 +193,7 @@ function Home({lang}){
     <section className="section">
       <div className="container">
         <SectionTitle kicker="TOP-RATED WORKERS" title="People your neighbors trust" text="Verified professionals with real booking histories and reviews."/>
-        <div className="worker-grid">{workers.slice(0,3).map(w=><WorkerCard key={w.id} w={w}/>)}</div>
+        <div className="worker-grid">{workers.slice(0,3).map(w=><WorkerCard key={w.id} w={w} locked={!user}/>)}</div>
         <div className="center"><Link to="/workers" className="btn btn-outline">Explore workers →</Link></div>
       </div>
     </section>
@@ -212,32 +212,44 @@ function Stat({n,label}){return <div><strong>{n}</strong><span>{label}</span></d
 function Step({n,icon,title,text}){return <div className="step"><div className="step-top"><span>{n}</span><div>{icon}</div></div><h3>{title}</h3><p>{text}</p></div>}
 function ServiceCard({s}){return <Link to={`/workers?service=${s.id}`} className="service-card"><div className="service-icon">{s.icon}</div><div><h3>{s.name}</h3><small>{s.bn}</small><p>{s.desc}</p><b>From {s.price}</b></div><span className="arrow">→</span></Link>}
 
-function Workers(){
+function Workers({user}){
   const [searchParams]=useSearchParams();
   const requestedService=(searchParams.get("service")||"").toLowerCase();
   const [query,setQuery]=useState("");
   const [apiWorkers,setApiWorkers]=useState([]);
-  useEffect(()=>{ api("/workers").then(d=>setApiWorkers(d.workers || [])).catch(()=>setApiWorkers([])); },[]);
+  const [locked,setLocked]=useState(!user);
   const [service,setService]=useState(serviceIdToKeyword[requestedService] ?? "");
   const [area,setArea]=useState("All areas");
+  useEffect(()=>{
+    let active=true;
+    api("/workers").then(d=>{ if(!active)return; setApiWorkers(d.workers||[]); setLocked(typeof d.locked==="boolean"?d.locked:!user); })
+      .catch(()=>{ if(active){ setApiWorkers([]); setLocked(!user); } });
+    return ()=>{ active=false; };
+  },[user]);
   useEffect(()=>{ setService(serviceIdToKeyword[requestedService] ?? ""); },[requestedService]);
-  const filtered=apiWorkers.filter(w=>(!service||w.service.toLowerCase().includes(service))&&(area==="All areas"||w.area===area)&&(w.name.toLowerCase().includes(query.toLowerCase())||w.service.toLowerCase().includes(query.toLowerCase())));
+  const filtered=apiWorkers.filter(w=>(!service||w.service.toLowerCase().includes(service))&&(locked||area==="All areas"||w.area===area)&&(w.name.toLowerCase().includes(query.toLowerCase())||w.service.toLowerCase().includes(query.toLowerCase())));
   return <main className="page">
     <div className="container">
-      <div className="page-heading"><div><span className="eyebrow">FIND A WORKER</span><h1>Verified workers near you</h1><p>Compare trusted professionals by service, area and rating.</p></div></div>
+      <div className="page-heading"><div><span className="eyebrow">FIND A WORKER</span><h1>Verified workers near you</h1><p>{locked?"Log in to compare trusted professionals by area, rating and price.":"Compare trusted professionals by service, area and rating."}</p></div></div>
       <div className="filters">
         <div className="filter-search">⌕<input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search worker or service"/></div>
         <select value={service} onChange={e=>setService(e.target.value)}>{serviceOptions.map(o=><option key={o.label} value={o.value}>{o.label}</option>)}</select>
-        <select value={area} onChange={e=>setArea(e.target.value)}><option>All areas</option><option>Mirpur</option><option>Uttara</option><option>Dhanmondi</option><option>Mohammadpur</option><option>Banani</option></select>
+        {!locked&&<select value={area} onChange={e=>setArea(e.target.value)}><option>All areas</option><option>Mirpur</option><option>Uttara</option><option>Dhanmondi</option><option>Mohammadpur</option><option>Banani</option></select>}
       </div>
-      <div className="results-bar"><b>{filtered.length} workers found</b><span>✓ All profiles are NID-verified</span></div>
-      <div className="worker-grid">{filtered.map(w=><WorkerCard key={w.id} w={w}/>)} </div>
+      <div className="results-bar"><b>{filtered.length} workers found</b>{locked?<span>🔒 <Link to="/login">Log in</Link> to see ratings, price and area</span>:<span>✓ All profiles are NID-verified</span>}</div>
+      <div className="worker-grid">{filtered.map(w=><WorkerCard key={w.id} w={w} locked={locked}/>)} </div>
       {!filtered.length && <div className="empty"><div>🔎</div><h3>No workers found</h3><p>Try another service, area or search term.</p></div>}
     </div>
   </main>
 }
 
-function WorkerCard({w}){
+function WorkerCard({w,locked}){
+  if(locked) return <div className="worker-card">
+    <div className="worker-head"><div className="avatar">{w.avatar}</div>{w.verified&&<span className="verified">✓ Verified</span>}</div>
+    <h3>{w.name}</h3><p className="role">{w.service}</p>
+    <div className="rating"><span>🔒 Rating, price and area are visible after login</span></div>
+    <div className="worker-bottom"><Link to={`/worker/${w.id}`} className="btn btn-outline btn-sm">View Profile</Link><Link to="/login" className="btn btn-primary btn-sm">Log in</Link></div>
+  </div>;
   return <div className="worker-card">
     <div className="worker-head"><div className="avatar">{w.avatar}</div><span className="verified">✓ Verified</span></div>
     <h3>{w.name}</h3><p className="role">{w.service} · {w.area}</p>
@@ -246,18 +258,47 @@ function WorkerCard({w}){
   </div>
 }
 
-function WorkerDetails({user,bookings,saveBookings}){
+function WorkerDetails({user}){
   const {id}=useParamsCompat();
-  const w=workers.find(x=>x.id===Number(id))||workers[0];
+  const [data,setData]=useState(null);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    let active=true;
+    setLoading(true);
+    api(`/workers/${id}`)
+      .then(d=>{ if(active){ setData(d); setLoading(false); } })
+      .catch(()=>{ if(active){ setData(null); setLoading(false); } });
+    return ()=>{ active=false; };
+  },[id,user]);
+
+  const sample=workers.find(x=>x.id===Number(id))||workers[0];
+  const w=data?.worker||sample;
+  const locked=data?data.locked:!user;
+
+  if(loading&&!data) return <main className="page"><div className="container narrow"><div className="empty"><p>Loading profile…</p></div></div></main>;
+
+  if(locked) return <main className="page"><div className="container narrow">
+    <Link to="/workers" className="back">← Back to workers</Link>
+    <div className="profile-card">
+      <div className="profile-top"><div className="avatar xl">{w.avatar}</div><div>{w.verified&&<div className="verified">✓ NID Verified</div>}<h1>{w.name}</h1><p>{w.service}</p></div></div>
+      <div className="profile-body">
+        <h2>Profile details are private</h2>
+        <p>Log in to see this worker's full profile — service area, pricing, ratings, reviews, experience and contact details.</p>
+        <div className="notice">🔒 Only registered users can view complete worker details.</div>
+      </div>
+      <div className="profile-action"><Link to="/login" state={{from:`/worker/${id}`}} className="btn btn-primary btn-lg">Log in to view full profile</Link><Link to="/register" className="btn btn-outline">Create an account</Link></div>
+    </div>
+  </div></main>;
+
   return <main className="page"><div className="container narrow">
     <Link to="/workers" className="back">← Back to workers</Link>
     <div className="profile-card">
       <div className="profile-top"><div className="avatar xl">{w.avatar}</div><div><div className="verified">✓ NID Verified</div><h1>{w.name}</h1><p>{w.service} · {w.area}</p><div className="rating"><b>★ {w.rating}</b><span>{w.reviews} reviews</span></div></div><div className="profile-price"><small>Starting from</small><strong>{w.price}</strong></div></div>
-      <div className="profile-stats"><div><b>{w.jobs}</b><span>Jobs completed</span></div><div><b>{w.rating}</b><span>Average rating</span></div><div><b>2 yrs</b><span>On platform</span></div><div><b>98%</b><span>Acceptance</span></div></div>
-      <div className="profile-body"><h2>About this worker</h2><p>Experienced local professional providing reliable home services. Profile identity has been verified by SheboyHaat administration. Customers can review workers only after a completed booking.</p><h2>Recent reviews</h2><p>Reviews from completed bookings will appear here.</p></div>
+      <div className="profile-stats"><div><b>{w.jobs}</b><span>Jobs completed</span></div><div><b>{w.rating}</b><span>Average rating</span></div><div><b>{w.experience||"—"}</b><span>Years experience</span></div><div><b>{w.phone||"Private"}</b><span>Contact</span></div></div>
+      <div className="profile-body"><h2>About this worker</h2><p>{data?.bio||w.bio||"Experienced local professional providing reliable home services. Profile identity has been verified by SheboyHaat administration."}</p><h2>Recent reviews</h2>{data?.reviews?.length?data.reviews.map((rv,i)=><Review key={i} name={rv.customerName} text={rv.comment||"No comment"} stars={"★".repeat(rv.rating)}/>):<p>No reviews yet. Reviews from completed bookings will appear here.</p>}</div>
       <div className="profile-action"><Link to={`/book/${w.id}`} className="btn btn-primary btn-lg">Book this worker</Link></div>
     </div>
-  </div></main>
+  </div></main>;
 }
 function Review({name,text,stars}){return <div className="review"><div className="avatar mini">{name.slice(0,1)}</div><div><b>{name}</b><span className="stars">{stars}</span><p>{text}</p></div></div>}
 function useParamsCompat(){ const loc=useLocation(); return {id:loc.pathname.split("/").pop()}; }
