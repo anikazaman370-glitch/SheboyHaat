@@ -50,6 +50,21 @@ Open the Vite URL shown in the terminal, usually `http://localhost:5173`.
 | `npm run db:seed` | Insert sample workers and the demo admin |
 | `npm run db:setup` | All three above, in order |
 
+## Sessions & staying logged in
+Login returns a **short-lived access token** (default 15 minutes) plus a **refresh token** stored in an `httpOnly` cookie (default 30 days).
+The frontend silently renews the access token when it expires, so users stay logged in between visits without re-entering credentials.
+Refresh tokens are rotated on every use and revoked on logout.
+
+Relevant env vars in `backend/.env`:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ACCESS_TOKEN_TTL` | `15m` | Lifetime of the short-lived session token |
+| `REFRESH_TOKEN_TTL_DAYS` | `30` | How long a user stays logged in |
+| `COOKIE_SECURE` | `false` | Set `true` (HTTPS) in production |
+| `COOKIE_SAMESITE` | `lax` | Set `none` with `COOKIE_SECURE=true` for cross-site production |
+
+Auth endpoints: `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/refresh`, `POST /api/auth/logout`, `GET /api/auth/me`.
+
 ## Notes
 - For database-backed bookings, register/login first and keep both terminals running.
 - The frontend keeps sample fallback data for demos if the API is unavailable.

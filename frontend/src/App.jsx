@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, refreshSession, getToken, setToken, setStoredUser } from "./api";
 import { Routes, Route, Link, NavLink, useNavigate, useLocation, Navigate } from "react-router-dom";
 
 const homeFor = (role) => role === "admin" ? "/admin" : role === "worker" ? "/worker-dashboard" : "/bookings";
@@ -36,18 +36,40 @@ function App(){
   const [user,setUser] = useState(() => {
     try { return JSON.parse(localStorage.getItem("sheboyhaat_user")) || null; } catch { return null; }
   });
+  const [authReady,setAuthReady] = useState(false);
 
   const saveBookings = (next) => { setBookings(next); localStorage.setItem("sheboyhaat_bookings", JSON.stringify(next)); };
-  const login = (u) => { setUser(u); localStorage.setItem("sheboyhaat_user",JSON.stringify(u)); };
+  const login = (u) => { setUser(u); setStoredUser(u); };
   const navigate = useNavigate();
-  const logout = () => { setUser(null); localStorage.removeItem("sheboyhaat_user"); localStorage.removeItem("sheboyhaat_token"); navigate("/"); };
+  const logout = async () => {
+    try { await api("/auth/logout", { method: "POST" }); } catch { /* ignore */ }
+    setUser(null); setToken(null); setStoredUser(null); navigate("/");
+  };
 
   useEffect(() => {
-    const token = localStorage.getItem("sheboyhaat_token");
-    if (!token) { localStorage.removeItem("sheboyhaat_user"); setUser(null); return; }
-    api("/auth/me")
-      .then(d => { setUser(d.user); localStorage.setItem("sheboyhaat_user", JSON.stringify(d.user)); })
-      .catch(() => { setUser(null); localStorage.removeItem("sheboyhaat_user"); localStorage.removeItem("sheboyhaat_token"); });
+    let active = true;
+    (async () => {
+      try {
+        if (getToken()) {
+          try {
+            const d = await api("/auth/me");
+            if (active) { setUser(d.user); setStoredUser(d.user); }
+            return;
+          } catch { /* access token invalid or expired, try refresh cookie below */ }
+        }
+        try {
+          const d = await refreshSession();
+          if (!active) return;
+          if (d?.user) { setUser(d.user); setStoredUser(d.user); }
+          else { setUser(null); setStoredUser(null); }
+        } catch {
+          if (active) { setUser(null); setStoredUser(null); }
+        }
+      } finally {
+        if (active) setAuthReady(true);
+      }
+    })();
+    return () => { active = false; };
   }, []);
 
   return <div className="app">
@@ -58,20 +80,21 @@ function App(){
       <Route path="/workers" element={<Workers/>}/>
       <Route path="/worker/:id" element={<WorkerDetails user={user} bookings={bookings} saveBookings={saveBookings}/>}/>
       <Route path="/book/:workerId" element={<Booking user={user} bookings={bookings} saveBookings={saveBookings}/>}/>
-      <Route path="/bookings" element={<RequireAuth user={user}><Bookings bookings={bookings} user={user}/></RequireAuth>}/>
+      <Route path="/bookings" element={<RequireAuth user={user} ready={authReady}><Bookings bookings={bookings} user={user}/></RequireAuth>}/>
       <Route path="/login" element={<Login login={login}/>}/>
       <Route path="/register" element={<Register login={login}/>}/>
-      <Route path="/worker-dashboard" element={<RequireAuth user={user} role="worker"><WorkerDashboard bookings={bookings} saveBookings={saveBookings}/></RequireAuth>}/>
-      <Route path="/admin" element={<RequireAuth user={user} role="admin"><Admin bookings={bookings} saveBookings={saveBookings}/></RequireAuth>}/>
-      <Route path="/profile" element={<RequireAuth user={user}><Profile user={user} logout={logout}/></RequireAuth>}/>
+      <Route path="/worker-dashboard" element={<RequireAuth user={user} role="worker" ready={authReady}><WorkerDashboard bookings={bookings} saveBookings={saveBookings}/></RequireAuth>}/>
+      <Route path="/admin" element={<RequireAuth user={user} role="admin" ready={authReady}><Admin bookings={bookings} saveBookings={saveBookings}/></RequireAuth>}/>
+      <Route path="/profile" element={<RequireAuth user={user} ready={authReady}><Profile user={user} logout={logout}/></RequireAuth>}/>
       <Route path="*" element={<NotFound/>}/>
     </Routes>
     <Footer/>
   </div>
 }
 
-function RequireAuth({user,role,children}){
+function RequireAuth({user,role,ready,children}){
   const location = useLocation();
+  if(!ready) return <main className="page"><div className="container empty"><p>Restoring your session…</p></div></main>;
   if(!user) return <Navigate to="/login" replace state={{from:location.pathname}}/>;
   if(role && user.role!==role) return <Navigate to={homeFor(user.role)} replace/>;
   return children;
@@ -260,7 +283,7 @@ function Status({s}){return <span className={"status "+s.toLowerCase()}>{s}</spa
 
 function Login({login}){
   const navigate=useNavigate(); const [email,setEmail]=useState(""); const [password,setPassword]=useState("");
-  const submit=async e=>{e.preventDefault(); try { const d=await api("/auth/login",{method:"POST",body:JSON.stringify({email,password})}); if(d.token)localStorage.setItem("sheboyhaat_token",d.token); login(d.user); navigate(homeFor(d.user.role)); } catch(err) { alert(err.message+". If this is your first visit, register a new account."); return; }};
+  const submit=async e=>{e.preventDefault(); try { const d=await api("/auth/login",{method:"POST",body:JSON.stringify({email,password})}); setToken(d.token||d.accessToken); login(d.user); navigate(homeFor(d.user.role)); } catch(err) { alert(err.message+". If this is your first visit, register a new account."); return; }};
   return <main className="auth-page"><div className="auth-card"><Link to="/" className="logo center-logo"><span className="logo-mark">শ</span><span>Sheboy<span>Haat</span></span></Link><h1>Welcome back</h1><p>Log in to manage your bookings.</p><form onSubmit={submit}><label>Email<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••"/></label><button className="btn btn-primary btn-lg full">Log in</button></form><div className="divider">or</div><Link to="/register" className="btn btn-outline full">Create an account</Link><small className="demo-note">Your session is verified against the SheboyHaat API.</small></div></main>
 }
 
@@ -268,7 +291,7 @@ function Register({login}){
   const navigate=useNavigate();
   const [role,setRole]=useState("customer"),[name,setName]=useState(""),[email,setEmail]=useState(""),[password,setPassword]=useState("");
   const [phone,setPhone]=useState(""),[service,setService]=useState(""),[area,setArea]=useState(""),[experience,setExperience]=useState(""),[price,setPrice]=useState("500"),[nid,setNid]=useState(null),[busy,setBusy]=useState(false);
-  const submit=async e=>{e.preventDefault();setBusy(true);try{const d=await api("/auth/register",{method:"POST",body:JSON.stringify({name,email,password,role,phone,service,area,experience,price,nidFileName:nid?.name||"",nidData:nid?await fileToDataUrl(nid):""})});if(d.token)localStorage.setItem("sheboyhaat_token",d.token);login(d.user);navigate(homeFor(role));}catch(err){alert(err.message);}finally{setBusy(false);}};
+  const submit=async e=>{e.preventDefault();setBusy(true);try{const d=await api("/auth/register",{method:"POST",body:JSON.stringify({name,email,password,role,phone,service,area,experience,price,nidFileName:nid?.name||"",nidData:nid?await fileToDataUrl(nid):""})});setToken(d.token||d.accessToken);login(d.user);navigate(homeFor(role));}catch(err){alert(err.message);}finally{setBusy(false);}};
   return <main className="auth-page"><div className="auth-card wide"><Link to="/" className="logo center-logo"><span className="logo-mark">শ</span><span>Sheboy<span>Haat</span></span></Link><h1>Create your account</h1><p>Join Bangladesh's trusted local service platform.</p><div className="role-toggle"><button type="button" className={role==="customer"?"active":""} onClick={()=>setRole("customer")}>Customer</button><button type="button" className={role==="worker"?"active":""} onClick={()=>setRole("worker")}>Service Worker</button></div>
   <form onSubmit={submit}><label>Full name<input required value={name} onChange={e=>setName(e.target.value)} placeholder="Your full name"/></label><label>Email<input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"/></label><label>Password<input required type="password" minLength="6" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 6 characters"/></label>
   {role==="worker"&&<><label>Phone number<input required value={phone} onChange={e=>setPhone(e.target.value)} placeholder="01XXXXXXXXX"/></label><label>Service category<input required value={service} onChange={e=>setService(e.target.value)} placeholder="e.g. Plumber, Electrician"/></label><label>Service area<input required value={area} onChange={e=>setArea(e.target.value)} placeholder="e.g. Mirpur, Dhaka"/></label><label>Years of experience<input required type="number" min="0" value={experience} onChange={e=>setExperience(e.target.value)}/></label><label>Starting price (BDT)<input required type="number" min="0" value={price} onChange={e=>setPrice(e.target.value)}/></label><label>Upload NID card (image or PDF)<input required type="file" accept="image/*,application/pdf" onChange={e=>setNid(e.target.files?.[0]||null)}/></label><div className="notice">Your profile will stay hidden until an admin reviews your NID and verifies your details.</div></>}

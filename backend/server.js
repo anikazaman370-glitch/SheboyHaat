@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
@@ -11,16 +12,51 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
 const SECRET = process.env.JWT_SECRET || 'development_only_change_me';
+const IS_PROD = process.env.NODE_ENV === 'production';
+const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || '15m';
+const REFRESH_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 30);
+const REFRESH_COOKIE = 'sheboyhaat_refresh';
+const REFRESH_COOKIE_PATH = '/api/auth';
+const REFRESH_COOKIE_OPTIONS = {
+  httpOnly: true,
+  sameSite: process.env.COOKIE_SAMESITE || (IS_PROD ? 'strict' : 'lax'),
+  secure: process.env.COOKIE_SECURE === 'true' || IS_PROD,
+  path: REFRESH_COOKIE_PATH
+};
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
-app.use(cors({ origin: (origin, cb) => { if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true); return cb(null, false); } }));
+app.use(cors({ credentials: true, origin: (origin, cb) => { if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true); return cb(null, false); } }));
 app.use(express.json({ limit: '3mb' }));
+app.use((req, _res, next) => {
+  const header = req.headers.cookie;
+  req.cookies = {};
+  if (header) for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i > -1) req.cookies[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  next();
+});
 
 const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-function tokenFor(u) { return jwt.sign({ id: u.id, email: u.email, role: u.role }, SECRET, { expiresIn: '7d' }); }
+function tokenFor(u) { return jwt.sign({ id: u.id, email: u.email, role: u.role }, SECRET, { expiresIn: ACCESS_TOKEN_TTL }); }
 function auth(req, res, next) { const h = req.headers.authorization || ''; try { if (!h.startsWith('Bearer ')) throw Error(); req.user = jwt.verify(h.slice(7), SECRET); next(); } catch { return res.status(401).json({ message: 'Please log in to continue.' }); } }
+
+const hashToken = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
+function safeUser(u) { return { id: u.id, name: u.name, email: u.email, role: u.role }; }
+async function issueRefreshToken(userId, res) {
+  const raw = crypto.randomBytes(40).toString('hex');
+  const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000);
+  await prisma.refreshToken.create({ data: { tokenHash: hashToken(raw), userId, expiresAt } });
+  res.cookie(REFRESH_COOKIE, raw, { ...REFRESH_COOKIE_OPTIONS, maxAge: REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000 });
+  return raw;
+}
+async function startSession(user, res, status = 200) {
+  const accessToken = tokenFor(user);
+  await issueRefreshToken(user.id, res);
+  res.status(status).json({ user: safeUser(user), accessToken, token: accessToken });
+}
 function admin(req, res, next) { if (req.user?.role !== 'admin') return res.status(403).json({ message: 'Admin access required.' }); next(); }
 
 function workerOut(w) {
@@ -68,16 +104,40 @@ app.post('/api/auth/register', ah(async (q, r) => {
   if (role === 'worker') {
     await prisma.worker.create({ data: { userId: u.id, name: u.name, service: String(service), area: String(area), rating: 5, reviewCount: 0, price: '৳' + String(price), verified: false, avatar: u.name.slice(0, 2).toUpperCase(), jobs: 0, bio: 'Awaiting admin verification.', phone: String(phone), experience: String(experience), nidFileName: String(nidFileName), nidData: String(nidData) } });
   }
-  const safe = { id: u.id, name: u.name, email: u.email, role: u.role };
-  r.status(201).json({ user: safe, token: tokenFor(safe) });
+  await startSession(u, r, 201);
 }));
 
 app.post('/api/auth/login', ah(async (q, r) => {
   const email = String(q.body?.email || '').trim().toLowerCase();
   const u = await prisma.user.findUnique({ where: { email } });
   if (!u || !(await bcrypt.compare(String(q.body?.password || ''), u.passwordHash))) return r.status(401).json({ message: 'Incorrect email or password.' });
-  const safe = { id: u.id, name: u.name, email: u.email, role: u.role };
-  r.json({ user: safe, token: tokenFor(safe) });
+  await startSession(u, r);
+}));
+
+app.post('/api/auth/refresh', ah(async (q, r) => {
+  const raw = q.cookies?.[REFRESH_COOKIE];
+  if (!raw) return r.status(401).json({ message: 'No active session. Please log in.' });
+  const stored = await prisma.refreshToken.findUnique({ where: { tokenHash: hashToken(raw) } });
+  if (!stored || stored.revoked || stored.expiresAt <= new Date()) {
+    if (stored) await prisma.refreshToken.delete({ where: { id: stored.id } }).catch(() => {});
+    r.clearCookie(REFRESH_COOKIE, REFRESH_COOKIE_OPTIONS);
+    return r.status(401).json({ message: 'Session expired. Please log in again.' });
+  }
+  const u = await prisma.user.findUnique({ where: { id: stored.userId }, select: { id: true, name: true, email: true, role: true } });
+  if (!u) {
+    await prisma.refreshToken.delete({ where: { id: stored.id } }).catch(() => {});
+    r.clearCookie(REFRESH_COOKIE, REFRESH_COOKIE_OPTIONS);
+    return r.status(401).json({ message: 'Account no longer exists.' });
+  }
+  await prisma.refreshToken.delete({ where: { id: stored.id } });
+  await startSession(u, r);
+}));
+
+app.post('/api/auth/logout', ah(async (q, r) => {
+  const raw = q.cookies?.[REFRESH_COOKIE];
+  if (raw) await prisma.refreshToken.deleteMany({ where: { tokenHash: hashToken(raw) } });
+  r.clearCookie(REFRESH_COOKIE, REFRESH_COOKIE_OPTIONS);
+  r.json({ message: 'Logged out.' });
 }));
 
 app.get('/api/auth/me', auth, ah(async (q, r) => {
