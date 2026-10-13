@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api, refreshSession, getToken, setToken, setStoredUser } from "./api";
-import { Routes, Route, Link, NavLink, useNavigate, useLocation, Navigate } from "react-router-dom";
+import { Routes, Route, Link, NavLink, useNavigate, useLocation, useSearchParams, Navigate } from "react-router-dom";
 
 const homeFor = (role) => role === "admin" ? "/admin" : role === "worker" ? "/worker-dashboard" : "/bookings";
 
@@ -11,6 +11,17 @@ const services = [
   { id:"ac", icon:"❄️", name:"AC Service", bn:"এসি সার্ভিস", desc:"AC servicing, gas & installation", price:"৳800+" },
   { id:"appliance", icon:"🔌", name:"Appliance Repair", bn:"যন্ত্রপাতি", desc:"Fridge, washing machine & appliances", price:"৳600+" },
   { id:"painting", icon:"🎨", name:"Painting", bn:"রং করা", desc:"Room painting and wall touch-ups", price:"৳1,200+" }
+];
+
+const serviceIdToKeyword = { plumbing:"plumb", electrical:"electr", cleaning:"clean", ac:"ac", appliance:"appliance", painting:"paint" };
+const serviceOptions = [
+  { label:"All services", value:"" },
+  { label:"Plumber", value:"plumb" },
+  { label:"Electrician", value:"electr" },
+  { label:"Home Cleaner", value:"clean" },
+  { label:"AC Technician", value:"ac" },
+  { label:"Appliance Repair", value:"appliance" },
+  { label:"Painting", value:"paint" }
 ];
 
 const workers = [
@@ -202,18 +213,21 @@ function Step({n,icon,title,text}){return <div className="step"><div className="
 function ServiceCard({s}){return <Link to={`/workers?service=${s.id}`} className="service-card"><div className="service-icon">{s.icon}</div><div><h3>{s.name}</h3><small>{s.bn}</small><p>{s.desc}</p><b>From {s.price}</b></div><span className="arrow">→</span></Link>}
 
 function Workers(){
+  const [searchParams]=useSearchParams();
+  const requestedService=(searchParams.get("service")||"").toLowerCase();
   const [query,setQuery]=useState("");
   const [apiWorkers,setApiWorkers]=useState([]);
   useEffect(()=>{ api("/workers").then(d=>setApiWorkers(d.workers || [])).catch(()=>setApiWorkers([])); },[]);
-  const [service,setService]=useState("All");
+  const [service,setService]=useState(serviceIdToKeyword[requestedService] ?? "");
   const [area,setArea]=useState("All areas");
-  const filtered=apiWorkers.filter(w=>(service==="All"||w.service.toLowerCase().includes(service.toLowerCase()))&&(area==="All areas"||w.area===area)&&(w.name.toLowerCase().includes(query.toLowerCase())||w.service.toLowerCase().includes(query.toLowerCase())));
+  useEffect(()=>{ setService(serviceIdToKeyword[requestedService] ?? ""); },[requestedService]);
+  const filtered=apiWorkers.filter(w=>(!service||w.service.toLowerCase().includes(service))&&(area==="All areas"||w.area===area)&&(w.name.toLowerCase().includes(query.toLowerCase())||w.service.toLowerCase().includes(query.toLowerCase())));
   return <main className="page">
     <div className="container">
       <div className="page-heading"><div><span className="eyebrow">FIND A WORKER</span><h1>Verified workers near you</h1><p>Compare trusted professionals by service, area and rating.</p></div></div>
       <div className="filters">
         <div className="filter-search">⌕<input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search worker or service"/></div>
-        <select value={service} onChange={e=>setService(e.target.value)}><option>All</option><option>Plumber</option><option>Electrician</option><option>Home Cleaner</option><option>AC Technician</option></select>
+        <select value={service} onChange={e=>setService(e.target.value)}>{serviceOptions.map(o=><option key={o.label} value={o.value}>{o.label}</option>)}</select>
         <select value={area} onChange={e=>setArea(e.target.value)}><option>All areas</option><option>Mirpur</option><option>Uttara</option><option>Dhanmondi</option><option>Mohammadpur</option><option>Banani</option></select>
       </div>
       <div className="results-bar"><b>{filtered.length} workers found</b><span>✓ All profiles are NID-verified</span></div>
