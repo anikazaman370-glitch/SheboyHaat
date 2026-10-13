@@ -248,7 +248,7 @@ function WorkerCard({w,locked}){
     <div className="worker-head"><div className="avatar">{w.avatar}</div>{w.verified&&<span className="verified">✓ Verified</span>}</div>
     <h3>{w.name}</h3><p className="role">{w.service}</p>
     <div className="rating"><span>🔒 Rating, price and area are visible after login</span></div>
-    <div className="worker-bottom"><Link to={`/worker/${w.id}`} className="btn btn-outline btn-sm">View Profile</Link><Link to="/login" className="btn btn-primary btn-sm">Log in</Link></div>
+    <div className="worker-bottom"><Link to={`/worker/${w.id}`} className="btn btn-primary btn-sm">View Profile</Link></div>
   </div>;
   return <div className="worker-card">
     <div className="worker-head"><div className="avatar">{w.avatar}</div><span className="verified">✓ Verified</span></div>
