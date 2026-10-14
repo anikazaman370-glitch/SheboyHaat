@@ -54,6 +54,9 @@ model Worker {
   experience  String  @default("")
   nidFileName String  @default("") @map("nid_file_name")
   nidData     String  @default("") @map("nid_data")
+  rejected          Boolean @default(false)
+  rejectionReasonEn String  @default("") @map("rejection_reason_en")
+  rejectionReasonBn String  @default("") @map("rejection_reason_bn")
 
   user     User?     @relation(fields: [userId], references: [id])
   bookings Booking[]

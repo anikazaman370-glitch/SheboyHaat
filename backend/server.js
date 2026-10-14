@@ -4,10 +4,37 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { v2 as cloudinary } from 'cloudinary';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 dotenv.config();
+
+const CLOUDINARY_READY = Boolean(
+  process.env.CLOUDINARY_URL ||
+  (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET)
+);
+if (CLOUDINARY_READY) {
+  // ES module imports run before dotenv.config(), so the SDK may not have seen
+  // process.env.CLOUDINARY_URL yet. Force a reload from the environment now.
+  if (process.env.CLOUDINARY_URL) cloudinary.config(true);
+  const explicit = { secure: true };
+  if (process.env.CLOUDINARY_CLOUD_NAME) explicit.cloud_name = process.env.CLOUDINARY_CLOUD_NAME;
+  if (process.env.CLOUDINARY_API_KEY) explicit.api_key = process.env.CLOUDINARY_API_KEY;
+  if (process.env.CLOUDINARY_API_SECRET) explicit.api_secret = process.env.CLOUDINARY_API_SECRET;
+  cloudinary.config(explicit);
+}
+const CLOUDINARY_CONF = CLOUDINARY_READY ? cloudinary.config() : {};
+const CLOUDINARY_CLOUD = CLOUDINARY_CONF.cloud_name || '';
+const CLOUDINARY_KEY = CLOUDINARY_CONF.api_key || '';
+const CLOUDINARY_SECRET = CLOUDINARY_CONF.api_secret || '';
+const CLOUDINARY_API_HOST = process.env.CLOUDINARY_API_HOST || 'api.cloudinary.com';
+const CLOUDINARY_NID_FOLDER = process.env.CLOUDINARY_NID_FOLDER || 'sheboyhaat/nid';
+console.log(
+  CLOUDINARY_READY
+    ? `Cloudinary configured (cloud: ${CLOUDINARY_CLOUD || 'from CLOUDINARY_URL'}, host: ${CLOUDINARY_API_HOST})`
+    : 'Cloudinary not configured: NID files will be stored locally as data URLs.'
+);
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
@@ -28,7 +55,7 @@ const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
 app.use(cors({ credentials: true, origin: (origin, cb) => { if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true); return cb(null, false); } }));
-app.use(express.json({ limit: '3mb' }));
+app.use(express.json({ limit: '12mb' }));
 app.use((req, _res, next) => {
   const header = req.headers.cookie;
   req.cookies = {};
@@ -69,16 +96,76 @@ function workerOut(w, opts = {}) {
   const out = {
     id: w.id, userId: w.userId, name: w.name, service: w.service, area: w.area,
     rating: Number(w.rating), reviews: w.reviewCount, price: w.price, verified: !!w.verified,
+    rejected: !!w.rejected,
     avatar: w.avatar || w.name.split(' ').map(x => x[0]).join('').slice(0, 2),
     jobs: w.jobs
   };
   if (opts.full) {
     out.phone = w.phone || '';
     out.experience = w.experience || '';
-    out.nidFileName = w.nidFileName || '';
     out.bio = w.bio || '';
+    out.rejectionReasonEn = w.rejectionReasonEn || '';
+    out.rejectionReasonBn = w.rejectionReasonBn || '';
   }
   return out;
+}
+function adminWorkerOut(w) {
+  const raw = String(w.nidData || '');
+  const out = { ...workerOut(w, { full: true }), nidFileName: w.nidFileName || '' };
+  out.nidUrl = (isHttpUrl(raw) || isDataUrl(raw)) ? raw : '';
+  out.hasNid = Boolean(raw);
+  return out;
+}
+const isDataUrl = (v) => /^data:/i.test(String(v || ''));
+const isHttpUrl = (v) => /^https?:\/\//i.test(String(v || ''));
+const MIME_EXT = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/bmp': 'bmp', 'application/pdf': 'pdf' };
+function parseDataUrl(dataUrl) {
+  const m = /^data:([^;,]*)((?:;[^,]*)*),(.*)$/s.exec(String(dataUrl));
+  if (!m) return null;
+  const mime = m[1] || 'application/octet-stream';
+  const isBase64 = /base64/i.test(m[2] || '');
+  let buffer;
+  try {
+    buffer = isBase64 ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]), 'binary');
+  } catch {
+    return null;
+  }
+  return { mime, buffer };
+}
+async function uploadNidToCloudinary(fileData) {
+  if (!CLOUDINARY_READY) return null;
+  const parsed = parseDataUrl(fileData);
+  if (!parsed) throw new Error('Unsupported NID payload (expected a base64 data URL).');
+  const ext = MIME_EXT[parsed.mime] || 'bin';
+  const timestamp = Math.floor(Date.now() / 1000);
+  const params = { folder: CLOUDINARY_NID_FOLDER, timestamp };
+  const signature = cloudinary.utils.api_sign_request(params, CLOUDINARY_SECRET);
+  const form = new FormData();
+  form.append('file', new Blob([parsed.buffer], { type: parsed.mime }), `nid.${ext}`);
+  form.append('api_key', CLOUDINARY_KEY);
+  form.append('folder', String(params.folder));
+  form.append('timestamp', String(timestamp));
+  form.append('signature', signature);
+  const url = `https://${CLOUDINARY_API_HOST}/v1_1/${CLOUDINARY_CLOUD}/auto/upload`;
+  const res = await fetch(url, { method: 'POST', body: form });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = body?.error?.message || `HTTP ${res.status}`;
+    const err = new Error(detail);
+    err.http_code = res.status;
+    err.cloudinary = body?.error || null;
+    throw err;
+  }
+  return body.secure_url || (body.url ? String(body.url).replace(/^http:/, 'https:') : '');
+}
+async function uploadWorkerNid(nidData) {
+  const stored = String(nidData || '');
+  if (!stored || isHttpUrl(stored)) return stored;
+  if (!CLOUDINARY_READY) {
+    if (isDataUrl(stored)) console.warn('Cloudinary is not configured; storing the NID locally as a data URL. Set CLOUDINARY_* in backend/.env for real uploads.');
+    return stored;
+  }
+  return await uploadNidToCloudinary(stored);
 }
 function workerLimitedOut(w) {
   return {
@@ -90,7 +177,7 @@ function bookingOut(b) {
   return { id: b.bookingCode, service: b.service, worker: b.workerName, date: b.date, time: b.time, area: b.address, status: b.status, amount: b.amount };
 }
 
-app.get('/api/health', (_q, r) => r.json({ ok: true, service: 'SheboyHaat API', database: 'PostgreSQL' }));
+app.get('/api/health', (_q, r) => r.json({ ok: true, service: 'SheboyHaat API', database: 'PostgreSQL', cloudinary: CLOUDINARY_READY }));
 
 app.get('/api/services', (_q, r) => r.json({ services: [{ id: 'plumbing', name: 'Plumbing' }, { id: 'electrical', name: 'Electrical' }, { id: 'cleaning', name: 'Cleaning' }, { id: 'ac', name: 'AC Service' }, { id: 'appliance', name: 'Appliance Repair' }, { id: 'painting', name: 'Painting' }] }));
 
@@ -104,9 +191,52 @@ app.get('/api/workers', optionalAuth, ah(async (q, r) => {
   r.json({ workers: workers.map(w => full ? workerOut(w) : workerLimitedOut(w)), locked: !full });
 }));
 
+app.get('/api/workers/me', auth, ah(async (q, r) => {
+  const w = await prisma.worker.findFirst({ where: { userId: q.user.id } });
+  if (!w) return r.status(404).json({ message: 'No worker profile is linked to this account.' });
+  r.json({ worker: workerOut(w, { full: true }) });
+}));
+
+app.post('/api/workers/me/resubmit', auth, ah(async (q, r) => {
+  const w = await prisma.worker.findFirst({ where: { userId: q.user.id } });
+  if (!w) return r.status(404).json({ message: 'No worker profile is linked to this account.' });
+  const { nidData = '', nidFileName = '', phone = '', service = '', area = '', experience = '', price = '' } = q.body || {};
+  if (!nidData && !phone && !service && !area && !experience && !price) return r.status(400).json({ message: 'Please upload your NID document again or update your details.' });
+  let storedNid = w.nidData;
+  if (nidData && !isHttpUrl(String(nidData))) {
+    try {
+      storedNid = await uploadWorkerNid(nidData);
+    } catch (e) {
+      const detail = e?.error?.message || e?.message || 'Unknown error';
+      console.error('Cloudinary NID upload failed:', detail, e?.error || e);
+      return r.status(502).json({ message: `Could not upload the NID document to Cloudinary (${detail}). Please try again.` });
+    }
+  } else if (nidData) {
+    storedNid = String(nidData);
+  }
+  const data = {
+    verified: false,
+    rejected: false,
+    rejectionReasonEn: '',
+    rejectionReasonBn: '',
+    nidData: storedNid,
+    nidFileName: nidFileName || w.nidFileName
+  };
+  if (phone) data.phone = String(phone);
+  if (service) data.service = String(service);
+  if (area) data.area = String(area);
+  if (experience) data.experience = String(experience);
+  if (price) data.price = '৳' + String(price).replace(/^৳/, '');
+  const updated = await prisma.worker.update({ where: { id: w.id }, data });
+  r.json({ worker: workerOut(updated, { full: true }), message: 'Your details were resubmitted for verification.' });
+}));
+
 app.get('/api/workers/:id', optionalAuth, ah(async (q, r) => {
   const w = await prisma.worker.findUnique({ where: { id: Number(q.params.id) } });
   if (!w) return r.status(404).json({ message: 'Worker not found.' });
+  const isOwner = q.user && w.userId && w.userId === q.user.id;
+  const isAdmin = q.user && q.user.role === 'admin';
+  if (!w.verified && !isOwner && !isAdmin) return r.status(404).json({ message: 'Worker not found.' });
   if (!q.user) return r.json({ worker: workerLimitedOut(w), bio: '', reviews: [], locked: true });
   const reviews = await prisma.review.findMany({ where: { workerId: w.id }, orderBy: { id: 'desc' }, include: { customer: { select: { name: true } } } });
   r.json({ worker: workerOut(w, { full: true }), bio: w.bio, reviews: reviews.map(rv => ({ rating: rv.rating, comment: rv.comment, created_at: rv.createdAt, customerName: rv.customer.name })), locked: false });
@@ -120,9 +250,21 @@ app.post('/api/auth/register', ah(async (q, r) => {
   const normalized = String(email).trim().toLowerCase();
   if (await prisma.user.findUnique({ where: { email: normalized } })) return r.status(409).json({ message: 'Email already registered.' });
   const passwordHash = await bcrypt.hash(String(password), 10);
+
+  let storedNid = String(nidData || '');
+  if (role === 'worker' && storedNid) {
+    try {
+      storedNid = await uploadWorkerNid(storedNid);
+    } catch (e) {
+      const detail = e?.error?.message || e?.message || 'Unknown error';
+      console.error('Cloudinary NID upload failed:', detail, e?.error || e);
+      return r.status(502).json({ message: `Could not upload the NID document to Cloudinary (${detail}). Please try again.` });
+    }
+  }
+
   const u = await prisma.user.create({ data: { name: String(name).trim(), email: normalized, passwordHash, role } });
   if (role === 'worker') {
-    await prisma.worker.create({ data: { userId: u.id, name: u.name, service: String(service), area: String(area), rating: 5, reviewCount: 0, price: '৳' + String(price), verified: false, avatar: u.name.slice(0, 2).toUpperCase(), jobs: 0, bio: 'Awaiting admin verification.', phone: String(phone), experience: String(experience), nidFileName: String(nidFileName), nidData: String(nidData) } });
+    await prisma.worker.create({ data: { userId: u.id, name: u.name, service: String(service), area: String(area), rating: 5, reviewCount: 0, price: '৳' + String(price), verified: false, avatar: u.name.slice(0, 2).toUpperCase(), jobs: 0, bio: 'Awaiting admin verification.', phone: String(phone), experience: String(experience), nidFileName: String(nidFileName), nidData: storedNid } });
   }
   await startSession(u, r, 201);
 }));
@@ -212,7 +354,7 @@ app.post('/api/reviews', auth, ah(async (q, r) => {
 app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
   const [workers, pendingVerification, bookings, openReports] = await Promise.all([
     prisma.worker.count(),
-    prisma.worker.count({ where: { verified: false } }),
+    prisma.worker.count({ where: { verified: false, rejected: false } }),
     prisma.booking.count(),
     prisma.report.count({ where: { status: 'Open' } })
   ]);
@@ -221,14 +363,24 @@ app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
 
 app.get('/api/admin/workers', auth, admin, ah(async (_q, r) => {
   const workers = await prisma.worker.findMany({ orderBy: [{ verified: 'asc' }, { id: 'desc' }] });
-  r.json({ workers: workers.map(w => workerOut(w, { full: true })) });
+  r.json({ workers: workers.map(adminWorkerOut) });
 }));
 
 app.patch('/api/admin/workers/:id/verify', auth, admin, ah(async (q, r) => {
   const id = Number(q.params.id);
   if (!await prisma.worker.findUnique({ where: { id } })) return r.status(404).json({ message: 'Worker not found.' });
-  await prisma.worker.update({ where: { id }, data: { verified: true } });
+  await prisma.worker.update({ where: { id }, data: { verified: true, rejected: false, rejectionReasonEn: '', rejectionReasonBn: '' } });
   r.json({ message: 'Worker verified.' });
+}));
+
+app.patch('/api/admin/workers/:id/reject', auth, admin, ah(async (q, r) => {
+  const id = Number(q.params.id);
+  if (!await prisma.worker.findUnique({ where: { id } })) return r.status(404).json({ message: 'Worker not found.' });
+  const reasonEn = String(q.body?.reasonEn || '').trim();
+  const reasonBn = String(q.body?.reasonBn || '').trim();
+  if (!reasonEn && !reasonBn) return r.status(400).json({ message: 'Please provide a rejection reason in English or Bangla.' });
+  await prisma.worker.update({ where: { id }, data: { verified: false, rejected: true, rejectionReasonEn: reasonEn, rejectionReasonBn: reasonBn } });
+  r.json({ message: 'Worker rejected.' });
 }));
 
 app.post('/api/reports', auth, ah(async (q, r) => {

@@ -10,6 +10,41 @@ Install Node.js 18 or newer (recommended: current Node.js LTS), then open this f
 2. Open **Connection Details** and copy the connection string (it looks like `postgresql://user:password@host/dbname?sslmode=require`).
 3. Paste it into `backend/.env` as `DATABASE_URL`.
 
+## 1b. Configure Cloudinary (worker NID uploads)
+Worker NID documents are uploaded to Cloudinary so the admin can open and manually verify them before approving a worker.
+1. Create a free account at https://cloudinary.com.
+2. Open **Dashboard → Product Environment Credentials** and copy the **Cloud name**, **API Key** and **API Secret**.
+3. Add them to `backend/.env`:
+   ```
+   CLOUDINARY_CLOUD_NAME=your_cloud_name
+   CLOUDINARY_API_KEY=your_api_key
+   CLOUDINARY_API_SECRET=your_api_secret
+   CLOUDINARY_NID_FOLDER=sheboyhaat/nid
+   ```
+   (Alternatively set a single `CLOUDINARY_URL=cloudinary://API_KEY:API_SECRET@CLOUD_NAME`.)
+4. Restart the backend. `GET /api/health` reports `"cloudinary": true` once configured.
+
+Uploading happens **server-side** during registration, so the API secret never reaches the browser. If Cloudinary is not
+configured the NID is stored locally as a data URL (development fallback) and a warning is printed in the server console.
+The admin panel shows a **View NID** link (with an inline thumbnail for image files) for every worker awaiting verification.
+
+> If workers may upload PDF NIDs, make sure **Settings → Security → "Allow delivery of PDF and ZIP files"** is enabled in
+> Cloudinary, otherwise the stored PDF cannot be opened from the admin panel.
+
+> **403 "missing permissions (actions=[\"create\"])" when uploading?** The API key's role lacks upload permission. Open
+> **Console → Settings → API Keys**, pick the key used in `.env`, and assign it a role with the **create** (upload)
+> permission — e.g. **Master Admin**. Alternatively paste a full-access key. EU-region accounts must also set
+> `CLOUDINARY_API_HOST=api-eu.cloudinary.com`.
+
+### Worker verification workflow
+Every new worker starts as **Pending verification** and is hidden from customers until an admin approves them. In the admin
+panel (`/admin`) each pending worker shows the uploaded NID plus **Approve** and **Reject** actions.
+- **Approve** sets the worker live (visible to customers).
+- **Reject** asks the admin for a reason in **English and/or Bangla**; the profile stays hidden and the worker sees the
+  comment on their dashboard with a form to **re-upload their NID and/or correct their details**, which puts them back to
+  Pending. Rejected workers are listed separately in the admin panel and can be approved later.
+
+
 ## 2. Start backend (Terminal 1)
 ```powershell
 cd backend
@@ -74,7 +109,7 @@ and the admin listing always requests the full record.
 ## Notes
 - For database-backed bookings, register/login first and keep both terminals running.
 - The frontend keeps sample fallback data for demos if the API is unavailable.
-- Real OTP, real NID upload/verification, payment processing, maps, live notifications and production deployment are not implemented yet.
+- Real OTP, payment processing, maps, live notifications and production deployment are not implemented yet.
 - This is an academic prototype, not a production-ready service. Change the demo admin password and JWT secret before using real/private data.
 - Never commit `backend/.env` — it holds your database credentials.
 
