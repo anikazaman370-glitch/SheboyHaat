@@ -48,7 +48,7 @@ export async function refreshSession() {
   return refreshPromise;
 }
 
-const isAuthEndpoint = (path) => /^\/auth\/(login|register|refresh|logout)$/.test(path);
+const isAuthEndpoint = (path) => /^\/auth\/(login|register|refresh|logout|verify-otp|resend-otp)$/.test(path);
 
 export async function api(path, options = {}, retry = true) {
   let result = await rawRequest(path, options);
@@ -56,6 +56,11 @@ export async function api(path, options = {}, retry = true) {
     const refreshed = await refreshSession();
     if (refreshed) result = await rawRequest(path, options);
   }
-  if (!result.response.ok) throw new Error(result.data.message || `Request failed (${result.response.status})`);
+  if (!result.response.ok) {
+    const error = new Error(result.data.message || `Request failed (${result.response.status})`);
+    error.status = result.response.status;
+    error.data = result.data;
+    throw error;
+  }
   return result.data;
 }

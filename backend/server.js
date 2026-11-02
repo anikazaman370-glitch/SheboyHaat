@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import nodemailer from 'nodemailer';
 import { v2 as cloudinary } from 'cloudinary';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -54,6 +55,228 @@ const REFRESH_COOKIE_OPTIONS = {
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
+const OTP_TTL_MINUTES = Number(process.env.OTP_TTL_MINUTES || 5);
+const MAIL_FROM = process.env.MAIL_FROM || 'SheboyHaat <no-reply@sheboyhaat.local>';
+const SMTP_READY = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+const mailer = SMTP_READY ? nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: process.env.SMTP_SECURE === 'true',
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+}) : null;
+
+const SMS_API_URL = process.env.SMS_API_URL || '';
+const SMS_API_KEY = process.env.SMS_API_KEY || '';
+const SMS_SENDER_ID = process.env.SMS_SENDER_ID || '';
+const SMS_HTTP_METHOD = (process.env.SMS_HTTP_METHOD || 'GET').toUpperCase();
+const SMS_POST_BODY = process.env.SMS_POST_BODY || '';
+const SMS_BODY_ENCODE = process.env.SMS_BODY_ENCODE !== 'false';
+const SMS_MESSAGE_TEMPLATE = process.env.SMS_MESSAGE_TEMPLATE || 'SheboyHaat: Your verification code is {otp}. It expires in {minutes} minutes. Do not share this code with anyone.';
+const SMS_SUCCESS_REGEX = process.env.SMS_SUCCESS_REGEX || '';
+const SMS_HEADERS = (() => {
+  try {
+    const parsed = JSON.parse(process.env.SMS_HEADERS || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    console.warn('SMS_HEADERS is not valid JSON; ignoring it.');
+    return {};
+  }
+})();
+const GENERIC_SMS_READY = Boolean(SMS_API_URL);
+
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID || '';
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
+const TWILIO_FROM = process.env.TWILIO_FROM_NUMBER || '';
+const TWILIO_MESSAGING_SERVICE = process.env.TWILIO_MESSAGING_SERVICE_SID || '';
+const TWILIO_READY = Boolean(TWILIO_SID && TWILIO_TOKEN && (TWILIO_FROM || TWILIO_MESSAGING_SERVICE));
+const SMS_READY = GENERIC_SMS_READY || TWILIO_READY;
+console.log(GENERIC_SMS_READY
+  ? 'SMS gateway configured: OTP codes will be sent to user phone numbers.'
+  : TWILIO_READY
+    ? 'Twilio configured: OTP codes will be sent to user phone numbers.'
+    : 'SMS not configured: OTP codes will be printed to this console (development only).');
+
+function normalizePhone(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('880')) return '+' + digits;
+  if (digits.startsWith('0')) return '+880' + digits.slice(1);
+  if (digits.startsWith('1') && digits.length === 10) return '+880' + digits;
+  if (digits.length >= 10) return '+' + digits;
+  return '';
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const BD_PHONE_RE = /^01[3-9]\d{8}$/;
+const isValidEmail = (v) => EMAIL_RE.test(String(v || '').trim());
+function isValidBdPhone(raw) {
+  let digits = String(raw || '').replace(/\D/g, '');
+  if (digits.startsWith('880')) digits = '0' + digits.slice(3);
+  return BD_PHONE_RE.test(digits);
+}
+
+function generateOtp() { return String(crypto.randomInt(0, 1000000)).padStart(6, '0'); }
+const hashOtp = (otp) => crypto.createHash('sha256').update(String(otp)).digest('hex');
+
+async function sendOtpEmail(to, otp, name) {
+  const subject = 'Your SheboyHaat verification code';
+  const text = `Hello ${name || 'there'},\n\nYour SheboyHaat verification code is ${otp}.\nIt expires in ${OTP_TTL_MINUTES} minutes.\n\nIf you did not request this, you can safely ignore this email.`;
+  const html = `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto"><h2 style="color:#0f766e">SheboyHaat</h2><p>Hello ${name || 'there'},</p><p>Your verification code is:</p><p style="font-size:30px;font-weight:bold;letter-spacing:6px;color:#0f766e">${otp}</p><p>This code expires in ${OTP_TTL_MINUTES} minutes.</p><p style="color:#6b7280;font-size:12px">If you did not create an account, you can ignore this email.</p></div>`;
+  if (!mailer) {
+    console.warn(IS_PROD
+      ? `[OTP] SMTP not configured; cannot email ${to}.`
+      : `[OTP] SMTP not configured. Verification code for ${to}: ${otp}`);
+    return false;
+  }
+  await mailer.sendMail({ from: MAIL_FROM, to, subject, text, html });
+  return true;
+}
+
+const smsText = (otp) => SMS_MESSAGE_TEMPLATE
+  .replace(/\{otp\}/g, otp)
+  .replace(/\{minutes\}/g, String(OTP_TTL_MINUTES));
+
+function renderSmsTemplate(template, vars, encode = true) {
+  return String(template || '').replace(/\{(\w+)\}/g, (_, key) => {
+    const value = String(vars[key] ?? '');
+    return encode ? encodeURIComponent(value) : value;
+  });
+}
+
+function smsVars(phone, otp) {
+  return {
+    phone,
+    otp,
+    message: smsText(otp),
+    apiKey: SMS_API_KEY,
+    senderId: SMS_SENDER_ID,
+    minutes: OTP_TTL_MINUTES
+  };
+}
+
+function assertSmsDelivered(res, text) {
+  if (!res.ok) throw new Error(`SMS gateway responded with HTTP ${res.status}: ${String(text).slice(0, 200)}`);
+  if (SMS_SUCCESS_REGEX) {
+    if (!new RegExp(SMS_SUCCESS_REGEX, 'i').test(text)) throw new Error(`SMS gateway rejected the request: ${String(text).slice(0, 200)}`);
+    return;
+  }
+  if (/(error|failed|invalid|insufficient|denied|rejected)/i.test(text)) {
+    throw new Error(`SMS gateway rejected the request: ${String(text).slice(0, 200)}`);
+  }
+}
+
+async function sendViaGenericGateway(phone, otp) {
+  const vars = smsVars(phone, otp);
+  const headers = { ...SMS_HEADERS };
+  let url = SMS_API_URL;
+  let body;
+  if (SMS_HTTP_METHOD === 'POST') {
+    const qIndex = url.indexOf('?');
+    const bodyTemplate = SMS_POST_BODY || (qIndex >= 0 ? url.slice(qIndex + 1) : '');
+    if (qIndex >= 0) url = url.slice(0, qIndex);
+    url = renderSmsTemplate(url, vars);
+    body = renderSmsTemplate(bodyTemplate, vars, SMS_BODY_ENCODE);
+    if (body && !Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) {
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+  } else {
+    url = renderSmsTemplate(url, vars);
+  }
+  const res = await fetch(url, { method: SMS_HTTP_METHOD === 'POST' ? 'POST' : 'GET', headers, ...(body ? { body } : {}) });
+  const text = await res.text().catch(() => '');
+  assertSmsDelivered(res, text);
+  return true;
+}
+
+async function sendViaTwilio(phone, otp) {
+  const params = new URLSearchParams({ To: phone, Body: smsText(otp) });
+  if (TWILIO_MESSAGING_SERVICE) params.set('MessagingServiceSid', TWILIO_MESSAGING_SERVICE);
+  else params.set('From', TWILIO_FROM);
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Basic ' + Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64'),
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: params
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.message || `SMS gateway responded with HTTP ${res.status}`);
+  }
+  return true;
+}
+
+async function sendOtpSms(to, otp) {
+  const phone = normalizePhone(to);
+  if (!SMS_READY) {
+    console.warn(`[OTP] SMS not configured. Verification code for ${phone}: ${otp}`);
+    return false;
+  }
+  if (GENERIC_SMS_READY) return await sendViaGenericGateway(phone, otp);
+  return await sendViaTwilio(phone, otp);
+}
+
+async function deliverOtp(user, otp) {
+  if (user.phone) {
+    if (!SMS_READY) {
+      console.warn(`[OTP] SMS not configured. Verification code for ${user.phone}: ${otp}`);
+      return { delivered: false, channel: 'sms' };
+    }
+    try {
+      const delivered = await sendOtpSms(user.phone, otp);
+      return { delivered, channel: 'sms' };
+    } catch (e) {
+      const smsError = e?.message || String(e);
+      console.error('Failed to send OTP SMS:', smsError);
+      if (!SMTP_READY) return { delivered: false, channel: 'sms', error: smsError };
+      try {
+        const delivered = await sendOtpEmail(user.email, otp, user.name);
+        return { delivered, channel: 'email', error: smsError };
+      } catch (emailError) {
+        console.error('Failed to send OTP email:', emailError?.message || emailError);
+        return { delivered: false, channel: 'sms', error: smsError };
+      }
+    }
+  }
+  try {
+    const delivered = await sendOtpEmail(user.email, otp, user.name);
+    return { delivered, channel: 'email' };
+  } catch (e) {
+    console.error('Failed to send OTP email:', e?.message || e);
+    return { delivered: false, channel: 'email', error: e?.message || String(e) };
+  }
+}
+
+async function issueOtp(user, { channel = 'auto' } = {}) {
+  const otp = generateOtp();
+  const otpExpiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
+  await prisma.user.update({ where: { id: user.id }, data: { otpCode: hashOtp(otp), otpExpiresAt } });
+  let result;
+  if (channel === 'email') {
+    try {
+      const delivered = await sendOtpEmail(user.email, otp, user.name);
+      result = { delivered, channel: 'email' };
+    } catch (e) {
+      console.error('Failed to send OTP email:', e?.message || e);
+      result = { delivered: false, channel: 'email', error: e?.message || String(e) };
+    }
+  } else {
+    result = await deliverOtp(user, otp);
+  }
+  return { otp, ...result };
+}
+
+const otpPayload = (user, { otp, delivered, channel, error }) => ({
+  requiresOtp: true,
+  email: user.email,
+  phone: user.phone || '',
+  channel,
+  ...(delivered || IS_PROD ? {} : { devOtp: otp }),
+  ...(error && !IS_PROD ? { smsError: error } : {})
+});
+
+
 app.use(cors({ credentials: true, origin: (origin, cb) => { if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true); return cb(null, false); } }));
 app.use(express.json({ limit: '12mb' }));
 app.use((req, _res, next) => {
@@ -77,7 +300,7 @@ function optionalAuth(req, res, next) {
 }
 
 const hashToken = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
-function safeUser(u) { return { id: u.id, name: u.name, email: u.email, role: u.role }; }
+function safeUser(u) { return { id: u.id, name: u.name, email: u.email, phone: u.phone || '', role: u.role }; }
 async function issueRefreshToken(userId, res) {
   const raw = crypto.randomBytes(40).toString('hex');
   const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -95,7 +318,7 @@ function admin(req, res, next) { if (req.user?.role !== 'admin') return res.stat
 function workerOut(w, opts = {}) {
   const out = {
     id: w.id, userId: w.userId, name: w.name, service: w.service, area: w.area,
-    rating: Number(w.rating), reviews: w.reviewCount, price: w.price, verified: !!w.verified,
+    rating: Number(w.rating), reviews: w.reviewCount, reviewCount: w.reviewCount, price: w.price, verified: !!w.verified,
     rejected: !!w.rejected,
     avatar: w.avatar || w.name.split(' ').map(x => x[0]).join('').slice(0, 2),
     jobs: w.jobs
@@ -104,6 +327,7 @@ function workerOut(w, opts = {}) {
     out.phone = w.phone || '';
     out.experience = w.experience || '';
     out.bio = w.bio || '';
+    out.earnings = Number(w.earnings) || 0;
     out.rejectionReasonEn = w.rejectionReasonEn || '';
     out.rejectionReasonBn = w.rejectionReasonBn || '';
   }
@@ -174,7 +398,11 @@ function workerLimitedOut(w) {
   };
 }
 function bookingOut(b) {
-  return { id: b.bookingCode, service: b.service, worker: b.workerName, date: b.date, time: b.time, area: b.address, status: b.status, amount: b.amount };
+  return { id: b.bookingCode, service: b.service, worker: b.workerName, customer: b.customer?.name || '', date: b.date, time: b.time, area: b.address, note: b.note || '', status: b.status, amount: b.amount, reviewed: Array.isArray(b.reviews) ? b.reviews.length > 0 : false };
+}
+function amountToNumber(value) {
+  const parsed = parseInt(String(value || '').replace(/[^0-9]/g, ''), 10);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 app.get('/api/health', (_q, r) => r.json({ ok: true, service: 'SheboyHaat API', database: 'PostgreSQL', cloudinary: CLOUDINARY_READY }));
@@ -246,9 +474,22 @@ app.post('/api/auth/register', ah(async (q, r) => {
   const { name, email, password, role = 'customer', phone = '', service = 'General Service', area = 'Dhaka', experience = '', price = '500', nidFileName = '', nidData = '' } = q.body || {};
   if (!name || !email || !password || String(password).length < 6) return r.status(400).json({ message: 'Name, email and password (at least 6 characters) are required.' });
   if (!['customer', 'worker'].includes(role)) return r.status(400).json({ message: 'Invalid role.' });
-  if (role === 'worker' && (!phone || !service || !area || !nidFileName || !nidData)) return r.status(400).json({ message: 'Worker phone, service, area and NID upload are required.' });
+  if (!isValidEmail(email)) return r.status(400).json({ message: 'Enter a valid email address, e.g. name@example.com.' });
+  if (!isValidBdPhone(phone)) return r.status(400).json({ message: 'Enter a valid Bangladeshi phone number, e.g. 01712345678.' });
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) return r.status(400).json({ message: 'A valid phone number is required.' });
+  if (role === 'worker' && (!service || !area || !nidFileName || !nidData)) return r.status(400).json({ message: 'Worker service, area and NID upload are required.' });
   const normalized = String(email).trim().toLowerCase();
-  if (await prisma.user.findUnique({ where: { email: normalized } })) return r.status(409).json({ message: 'Email already registered.' });
+  const existing = await prisma.user.findUnique({ where: { email: normalized } });
+  if (existing?.isVerified) return r.status(409).json({ message: 'Email already registered.' });
+  const phoneOwner = await prisma.user.findUnique({ where: { phone: normalizedPhone } });
+  if (phoneOwner && phoneOwner.id !== existing?.id) return r.status(409).json({ message: 'This phone number is already registered.' });
+  if (existing && !existing.isVerified) {
+    const passwordHash = await bcrypt.hash(String(password), 10);
+    const updated = await prisma.user.update({ where: { id: existing.id }, data: { name: String(name).trim(), passwordHash, phone: normalizedPhone } });
+    const issued = await issueOtp(updated, { channel: 'email' });
+    return r.json({ ...otpPayload(updated, issued), message: `We emailed a new verification code to ${updated.email}. It expires in ${OTP_TTL_MINUTES} minutes.` });
+  }
   const passwordHash = await bcrypt.hash(String(password), 10);
 
   let storedNid = String(nidData || '');
@@ -262,18 +503,51 @@ app.post('/api/auth/register', ah(async (q, r) => {
     }
   }
 
-  const u = await prisma.user.create({ data: { name: String(name).trim(), email: normalized, passwordHash, role } });
+  const u = await prisma.user.create({ data: { name: String(name).trim(), email: normalized, phone: normalizedPhone, passwordHash, role, isVerified: false } });
   if (role === 'worker') {
     await prisma.worker.create({ data: { userId: u.id, name: u.name, service: String(service), area: String(area), rating: 5, reviewCount: 0, price: '৳' + String(price), verified: false, avatar: u.name.slice(0, 2).toUpperCase(), jobs: 0, bio: 'Awaiting admin verification.', phone: String(phone), experience: String(experience), nidFileName: String(nidFileName), nidData: storedNid } });
   }
-  await startSession(u, r, 201);
+  const issued = await issueOtp(u, { channel: 'email' });
+  r.status(201).json({ ...otpPayload(u, issued), message: `We emailed a verification code to ${u.email}. It expires in ${OTP_TTL_MINUTES} minutes.` });
 }));
 
 app.post('/api/auth/login', ah(async (q, r) => {
   const email = String(q.body?.email || '').trim().toLowerCase();
   const u = await prisma.user.findUnique({ where: { email } });
   if (!u || !(await bcrypt.compare(String(q.body?.password || ''), u.passwordHash))) return r.status(401).json({ message: 'Incorrect email or password.' });
+  if (!u.isVerified) {
+    const issued = await issueOtp(u, { channel: 'email' });
+    return r.status(403).json({ ...otpPayload(u, issued), message: `Your account is not verified yet. We emailed a new code to ${u.email}. It expires in ${OTP_TTL_MINUTES} minutes.` });
+  }
   await startSession(u, r);
+}));
+
+app.post('/api/auth/verify-otp', ah(async (q, r) => {
+  const phone = normalizePhone(q.body?.phone);
+  const email = String(q.body?.email || '').trim().toLowerCase();
+  const otp = String(q.body?.otp || '').trim();
+  if ((!phone && !email) || !otp) return r.status(400).json({ message: 'Email and verification code are required.' });
+  const u = phone
+    ? await prisma.user.findUnique({ where: { phone } })
+    : await prisma.user.findUnique({ where: { email } });
+  if (!u) return r.status(404).json({ message: 'Account not found. Please register again.' });
+  if (u.isVerified) return startSession(u, r);
+  if (!u.otpCode || !u.otpExpiresAt || u.otpExpiresAt <= new Date()) return r.status(400).json({ message: 'This code has expired. Please request a new one.' });
+  if (u.otpCode !== hashOtp(otp)) return r.status(400).json({ message: 'Incorrect verification code.' });
+  const updated = await prisma.user.update({ where: { id: u.id }, data: { isVerified: true, otpCode: null, otpExpiresAt: null } });
+  await startSession(updated, r);
+}));
+
+app.post('/api/auth/resend-otp', ah(async (q, r) => {
+  const phone = normalizePhone(q.body?.phone);
+  const email = String(q.body?.email || '').trim().toLowerCase();
+  if (!phone && !email) return r.status(400).json({ message: 'Email is required.' });
+  const u = phone
+    ? await prisma.user.findUnique({ where: { phone } })
+    : await prisma.user.findUnique({ where: { email } });
+  if (!u) return r.status(404).json({ message: 'Account not found. Please register again.' });
+  if (u.isVerified) return r.json({ message: 'This account is already verified.' });
+  r.json({ ...otpPayload(u, await issueOtp(u, { channel: 'email' })), message: `A new verification code has been emailed to ${u.email}. It expires in ${OTP_TTL_MINUTES} minutes.` });
 }));
 
 app.post('/api/auth/refresh', ah(async (q, r) => {
@@ -285,7 +559,7 @@ app.post('/api/auth/refresh', ah(async (q, r) => {
     r.clearCookie(REFRESH_COOKIE, REFRESH_COOKIE_OPTIONS);
     return r.status(401).json({ message: 'Session expired. Please log in again.' });
   }
-  const u = await prisma.user.findUnique({ where: { id: stored.userId }, select: { id: true, name: true, email: true, role: true } });
+  const u = await prisma.user.findUnique({ where: { id: stored.userId }, select: { id: true, name: true, email: true, phone: true, role: true } });
   if (!u) {
     await prisma.refreshToken.delete({ where: { id: stored.id } }).catch(() => {});
     r.clearCookie(REFRESH_COOKIE, REFRESH_COOKIE_OPTIONS);
@@ -303,9 +577,67 @@ app.post('/api/auth/logout', ah(async (q, r) => {
 }));
 
 app.get('/api/auth/me', auth, ah(async (q, r) => {
-  const u = await prisma.user.findUnique({ where: { id: q.user.id }, select: { id: true, name: true, email: true, role: true } });
+  const u = await prisma.user.findUnique({ where: { id: q.user.id }, select: { id: true, name: true, email: true, phone: true, role: true } });
   if (!u) return r.status(404).json({ message: 'User not found.' });
   r.json({ user: u });
+}));
+
+app.patch('/api/auth/profile', auth, ah(async (q, r) => {
+  const name = String(q.body?.name || '').trim();
+  const email = String(q.body?.email || '').trim().toLowerCase();
+  const phoneInput = String(q.body?.phone || '').trim();
+  if (!name) return r.status(400).json({ message: 'Please enter your full name.' });
+  if (!isValidEmail(email)) return r.status(400).json({ message: 'Enter a valid email address, e.g. name@example.com.' });
+  if (!isValidBdPhone(phoneInput)) return r.status(400).json({ message: 'Enter a valid Bangladeshi phone number, e.g. 01712345678.' });
+  const normalizedPhone = normalizePhone(phoneInput);
+  const emailOwner = await prisma.user.findUnique({ where: { email } });
+  if (emailOwner && emailOwner.id !== q.user.id) return r.status(409).json({ message: 'Email already registered.' });
+  const phoneOwner = await prisma.user.findUnique({ where: { phone: normalizedPhone } });
+  if (phoneOwner && phoneOwner.id !== q.user.id) return r.status(409).json({ message: 'This phone number is already registered.' });
+  const updated = await prisma.user.update({ where: { id: q.user.id }, data: { name, email, phone: normalizedPhone } });
+  if (updated.role === 'worker') {
+    await prisma.worker.updateMany({ where: { userId: updated.id }, data: { name: updated.name, phone: normalizedPhone } });
+  }
+  r.json({ user: safeUser(updated), message: 'Profile updated.' });
+}));
+
+app.delete('/api/auth/account', auth, ah(async (q, r) => {
+  const password = String(q.body?.password || '');
+  const user = await prisma.user.findUnique({ where: { id: q.user.id } });
+  if (!user) return r.status(404).json({ message: 'User not found.' });
+  if (!password || !(await bcrypt.compare(password, user.passwordHash))) return r.status(401).json({ message: 'Incorrect password.' });
+  if (user.role === 'admin') return r.status(403).json({ message: 'Admin accounts cannot be deleted.' });
+
+  const worker = await prisma.worker.findFirst({ where: { userId: user.id } });
+  const writtenReviews = await prisma.review.findMany({ where: { customerId: user.id }, select: { workerId: true } });
+  const affectedWorkers = [...new Set(writtenReviews.map((rv) => rv.workerId))];
+
+  await prisma.$transaction(async (tx) => {
+    if (worker) {
+      await tx.review.deleteMany({ where: { workerId: worker.id } });
+      await tx.booking.updateMany({ where: { workerId: worker.id }, data: { workerId: null } });
+      await tx.worker.delete({ where: { id: worker.id } });
+    }
+    await tx.review.deleteMany({ where: { customerId: user.id } });
+    await tx.message.deleteMany({ where: { senderId: user.id } });
+    await tx.report.updateMany({ where: { reporterId: user.id }, data: { reporterId: null } });
+    await tx.booking.updateMany({ where: { customerId: user.id }, data: { customerId: null } });
+    await tx.refreshToken.deleteMany({ where: { userId: user.id } });
+    await tx.user.delete({ where: { id: user.id } });
+  });
+
+  for (const workerId of affectedWorkers) {
+    const exists = await prisma.worker.findUnique({ where: { id: workerId } });
+    if (!exists) continue;
+    const [avg, count] = await Promise.all([
+      prisma.review.aggregate({ where: { workerId }, _avg: { rating: true } }),
+      prisma.review.count({ where: { workerId } })
+    ]);
+    await prisma.worker.update({ where: { id: workerId }, data: { rating: avg._avg.rating || 0, reviewCount: count } });
+  }
+
+  r.clearCookie(REFRESH_COOKIE, REFRESH_COOKIE_OPTIONS);
+  r.json({ message: 'Account deleted.' });
 }));
 
 app.post('/api/bookings', auth, ah(async (q, r) => {
@@ -320,35 +652,113 @@ app.post('/api/bookings', auth, ah(async (q, r) => {
 
 app.get('/api/bookings', auth, ah(async (q, r) => {
   let rows;
-  if (q.user.role === 'admin') rows = await prisma.booking.findMany({ orderBy: { id: 'desc' } });
-  else if (q.user.role === 'worker') rows = await prisma.booking.findMany({ where: { worker: { userId: q.user.id } }, orderBy: { id: 'desc' } });
-  else rows = await prisma.booking.findMany({ where: { customerId: q.user.id }, orderBy: { id: 'desc' } });
+  const include = { customer: { select: { name: true } }, reviews: { select: { id: true } } };
+  if (q.user.role === 'admin') rows = await prisma.booking.findMany({ orderBy: { id: 'desc' }, include });
+  else if (q.user.role === 'worker') rows = await prisma.booking.findMany({ where: { worker: { userId: q.user.id } }, orderBy: { id: 'desc' }, include });
+  else rows = await prisma.booking.findMany({ where: { customerId: q.user.id }, orderBy: { id: 'desc' }, include });
   r.json({ bookings: rows.map(bookingOut) });
 }));
 
 app.patch('/api/bookings/:code/status', auth, ah(async (q, r) => {
   const status = q.body?.status;
-  if (!['Accepted', 'Completed', 'Cancelled'].includes(status)) return r.status(400).json({ message: 'Invalid status.' });
+  if (!['Accepted', 'Work Done', 'Completed', 'Cancelled'].includes(status)) return r.status(400).json({ message: 'Invalid status.' });
   const b = await prisma.booking.findUnique({ where: { bookingCode: q.params.code } });
   if (!b) return r.status(404).json({ message: 'Booking not found.' });
   const isOwnWorker = q.user.role === 'worker' && b.workerId && await prisma.worker.findFirst({ where: { id: b.workerId, userId: q.user.id } });
-  if (q.user.role !== 'admin' && !isOwnWorker) return r.status(403).json({ message: 'You cannot update this booking.' });
+  const workerCanUpdate = isOwnWorker && (
+    (status === 'Accepted' && b.status === 'Requested') ||
+    (status === 'Work Done' && b.status === 'Accepted') ||
+    (status === 'Cancelled' && ['Requested', 'Accepted', 'Work Done'].includes(b.status))
+  );
+  const customerCanComplete = b.customerId === q.user.id && status === 'Completed' && ['Accepted', 'Work Done'].includes(b.status);
+  if (q.user.role !== 'admin' && !workerCanUpdate && !customerCanComplete) return r.status(403).json({ message: 'You cannot update this booking.' });
   const updated = await prisma.booking.update({ where: { bookingCode: q.params.code }, data: { status } });
+  if (status === 'Completed' && b.status !== 'Completed' && b.workerId) {
+    await prisma.worker.update({ where: { id: b.workerId }, data: { jobs: { increment: 1 }, earnings: { increment: amountToNumber(b.amount) } } });
+  }
   r.json({ booking: bookingOut(updated) });
 }));
 
-app.post('/api/reviews', auth, ah(async (q, r) => {
-  const { bookingCode, rating, comment = '' } = q.body || {};
-  const n = Number(rating);
-  if (!Number.isInteger(n) || n < 1 || n > 5) return r.status(400).json({ message: 'Rating must be 1 to 5.' });
-  const b = await prisma.booking.findFirst({ where: { bookingCode, customerId: q.user.id, status: 'Completed' } });
-  if (!b) return r.status(400).json({ message: 'Only your completed bookings can be reviewed.' });
-  if (await prisma.review.findFirst({ where: { bookingId: b.id } })) return r.status(409).json({ message: 'Booking already reviewed.' });
-  await prisma.review.create({ data: { bookingId: b.id, customerId: q.user.id, workerId: b.workerId, rating: n, comment: String(comment) } });
-  const agg = await prisma.review.aggregate({ where: { workerId: b.workerId }, _avg: { rating: true } });
-  const count = await prisma.review.count({ where: { workerId: b.workerId } });
-  await prisma.worker.update({ where: { id: b.workerId }, data: { rating: agg._avg.rating ?? 5, reviewCount: count } });
-  r.status(201).json({ message: 'Review submitted.' });
+app.post('/api/bookings/:code/review', auth, ah(async (q, r) => {
+  const rating = Number(q.body?.rating);
+  const comment = String(q.body?.comment || '').trim();
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) return r.status(400).json({ message: 'Rating must be between 1 and 5.' });
+  if (comment.length > 1000) return r.status(400).json({ message: 'Comment is too long (max 1000 characters).' });
+  const b = await prisma.booking.findUnique({ where: { bookingCode: q.params.code } });
+  if (!b) return r.status(404).json({ message: 'Booking not found.' });
+  if (b.customerId !== q.user.id) return r.status(403).json({ message: 'You can only review your own bookings.' });
+  if (!b.workerId) return r.status(400).json({ message: 'This booking has no worker to review.' });
+  if (b.status !== 'Completed') return r.status(400).json({ message: 'You can review a worker only after the work is completed.' });
+  const existing = await prisma.review.findFirst({ where: { bookingId: b.id } });
+  if (existing) return r.status(409).json({ message: 'You have already reviewed this booking.' });
+  const review = await prisma.review.create({ data: { bookingId: b.id, customerId: b.customerId, workerId: b.workerId, rating, comment } });
+  const [avg, count] = await Promise.all([
+    prisma.review.aggregate({ where: { workerId: b.workerId }, _avg: { rating: true } }),
+    prisma.review.count({ where: { workerId: b.workerId } })
+  ]);
+  await prisma.worker.update({ where: { id: b.workerId }, data: { rating: avg._avg.rating || 0, reviewCount: count } });
+  r.status(201).json({ review: { rating: review.rating, comment: review.comment } });
+}));
+
+async function bookingChatContext(code, user) {
+  const booking = await prisma.booking.findUnique({
+    where: { bookingCode: String(code) },
+    include: { worker: true, customer: { select: { id: true, name: true } } }
+  });
+  if (!booking) return { error: 404, message: 'Booking not found.' };
+  const isCustomer = booking.customerId != null && booking.customerId === user.id;
+  const isWorker = booking.worker?.userId != null && booking.worker.userId === user.id;
+  const isAdmin = user.role === 'admin';
+  if (!isCustomer && !isWorker && !isAdmin) return { error: 403, message: 'You can only chat about your own bookings.' };
+  return { booking };
+}
+
+const messageOut = (m, userId) => ({
+  id: m.id,
+  body: m.body,
+  senderId: m.senderId,
+  senderName: m.sender?.name || '',
+  createdAt: m.createdAt,
+  mine: m.senderId === userId
+});
+
+const chatBookingOut = (b) => ({
+  code: b.bookingCode,
+  service: b.service,
+  worker: b.workerName,
+  customer: b.customer?.name || '',
+  date: b.date,
+  time: b.time,
+  status: b.status
+});
+
+app.get('/api/bookings/:code/messages', auth, ah(async (q, r) => {
+  const ctx = await bookingChatContext(q.params.code, q.user);
+  if (ctx.error) return r.status(ctx.error).json({ message: ctx.message });
+  const where = { bookingId: ctx.booking.id };
+  const after = Number(q.query.after);
+  let rows;
+  if (Number.isFinite(after) && after > 0) {
+    where.id = { gt: after };
+    rows = await prisma.message.findMany({ where, orderBy: { id: 'asc' }, include: { sender: { select: { name: true } } } });
+  } else {
+    rows = await prisma.message.findMany({ where, orderBy: { id: 'desc' }, take: 500, include: { sender: { select: { name: true } } } });
+    rows.reverse();
+  }
+  r.json({ booking: chatBookingOut(ctx.booking), messages: rows.map((m) => messageOut(m, q.user.id)) });
+}));
+
+app.post('/api/bookings/:code/messages', auth, ah(async (q, r) => {
+  const ctx = await bookingChatContext(q.params.code, q.user);
+  if (ctx.error) return r.status(ctx.error).json({ message: ctx.message });
+  const body = String(q.body?.body || '').trim();
+  if (!body) return r.status(400).json({ message: 'Message cannot be empty.' });
+  if (body.length > 2000) return r.status(400).json({ message: 'Message is too long (maximum 2000 characters).' });
+  const created = await prisma.message.create({
+    data: { bookingId: ctx.booking.id, senderId: q.user.id, body },
+    include: { sender: { select: { name: true } } }
+  });
+  r.status(201).json({ message: messageOut(created, q.user.id) });
 }));
 
 app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {

@@ -29,12 +29,13 @@ async function main() {
 
   await prisma.user.upsert({
     where: { email: ADMIN_EMAIL },
-    update: { passwordHash: bcrypt.hashSync(ADMIN_PASSWORD, 10), role: 'admin' },
+    update: { passwordHash: bcrypt.hashSync(ADMIN_PASSWORD, 10), role: 'admin', isVerified: true },
     create: {
       name: 'Demo Admin',
       email: ADMIN_EMAIL,
       passwordHash: bcrypt.hashSync(ADMIN_PASSWORD, 10),
       role: 'admin',
+      isVerified: true,
     },
   });
   console.log(`Admin ready: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
