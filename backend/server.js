@@ -515,7 +515,7 @@ app.post('/api/auth/login', ah(async (q, r) => {
   const email = String(q.body?.email || '').trim().toLowerCase();
   const u = await prisma.user.findUnique({ where: { email } });
   if (!u || !(await bcrypt.compare(String(q.body?.password || ''), u.passwordHash))) return r.status(401).json({ message: 'Incorrect email or password.' });
-  if (!u.isVerified) {
+  if (!u.isVerified && u.role !== 'admin') {
     const issued = await issueOtp(u, { channel: 'email' });
     return r.status(403).json({ ...otpPayload(u, issued), message: `Your account is not verified yet. We emailed a new code to ${u.email}. It expires in ${OTP_TTL_MINUTES} minutes.` });
   }

@@ -438,6 +438,8 @@ const dict = {
         eyebrow: "IMPORTANT NOTES",
         title: "Please read before booking",
         text: "A few things to keep in mind to keep every booking safe and smooth.",
+        workerTitle: "Please read before accepting jobs",
+        workerText: "A few things to keep in mind to keep every job safe and smooth.",
         notes: [
           { t: "Verified workers only", d: "Every worker profile is NID-verified by an admin before it appears publicly." },
           { t: "Confirm the price first", d: "The listed price is a starting price. Agree on the final amount in chat before work starts." },
@@ -446,7 +448,16 @@ const dict = {
           { t: "Cancellations", d: "If plans change, let the worker know as early as possible through chat." },
           { t: "Report problems", d: "For unsafe or unprofessional behaviour, contact support with your booking ID." }
         ],
-        cta: "Find a worker"
+        workerNotes: [
+          { t: "Keep your profile complete", d: "Keep your NID, service area, pricing and experience up to date so customers can trust your profile." },
+          { t: "Respond to requests quickly", d: "Accept only the booking requests you can handle, and reply in chat as soon as possible." },
+          { t: "Agree on the final price", d: "The listed price is a starting price. Confirm the final amount with the customer in chat before starting work." },
+          { t: "Mark work as done", d: "After finishing the job, mark it as work done so the customer can confirm completion and leave a review." },
+          { t: "Keep communication in chat", d: "Use the booking chat for schedule changes, addresses and price updates so everything stays documented." },
+          { t: "Stay safe and professional", d: "Carry your ID, follow safety practices and report any unsafe situation to support with the booking ID." }
+        ],
+        cta: "Find a worker",
+        workerCta: "Go to dashboard"
       },
       help: {
         eyebrow: "NEED HELP",
@@ -917,6 +928,8 @@ const dict = {
         eyebrow: "গুরুত্বপূর্ণ নোট",
         title: "বুকিংয়ের আগে পড়ুন",
         text: "প্রতিটি বুকিং নিরাপদ ও সহজ রাখতে কয়েকটি বিষয় মনে রাখুন।",
+        workerTitle: "কাজ গ্রহণের আগে পড়ুন",
+        workerText: "প্রতিটি কাজ নিরাপদ ও সহজ রাখতে কয়েকটি বিষয় মনে রাখুন।",
         notes: [
           { t: "শুধু যাচাইকৃত কর্মী", d: "প্রকাশ্যে আসার আগে প্রতিটি কর্মী প্রোফাইল অ্যাডমিন দ্বারা এনআইডি যাচাইকৃত হয়।" },
           { t: "আগে মূল্য নিশ্চিত করুন", d: "দেখানো মূল্য শুরু মূল্য। কাজ শুরুর আগে চ্যাটে চূড়ান্ত মূল্যে একমত হোন।" },
@@ -925,7 +938,16 @@ const dict = {
           { t: "বাতিলকরণ", d: "পরিকল্পনা বদলালে যত দ্রুত সম্ভব চ্যাটে কর্মীকে জানান।" },
           { t: "সমস্যা জানান", d: "অনিরাপদ বা অপেশাদার আচরণের জন্য বুকিং আইডিসহ সাপোর্টে যোগাযোগ করুন।" }
         ],
-        cta: "ড্যাশবোর্ডে যান"
+        workerNotes: [
+          { t: "প্রোফাইল সম্পূর্ণ রাখুন", d: "গ্রাহক যাতে আপনার প্রোফাইলে ভরসা করতে পারেন সে জন্য এনআইডি, সেবা এলাকা, মূল্য ও অভিজ্ঞতা হালনাগাদ রাখুন।" },
+          { t: "রিকোয়েস্টে দ্রুত সাড়া দিন", d: "আপনি যে কাজগুলো করতে পারবেন শুধু সেগুলো গ্রহণ করুন এবং যত দ্রুত সম্ভব চ্যাটে উত্তর দিন।" },
+          { t: "চূড়ান্ত মূল্যে একমত হোন", d: "দেখানো মূল্য শুরু মূল্য। কাজ শুরুর আগে গ্রাহকের সাথে চ্যাটে চূড়ান্ত মূল্য নিশ্চিত করুন।" },
+          { t: "কাজ সম্পন্ন হিসেবে চিহ্নিত করুন", d: "কাজ শেষে এটি সম্পন্ন হিসেবে চিহ্নিত করুন যাতে গ্রাহক নিশ্চিত করে রিভিউ দিতে পারেন।" },
+          { t: "যোগাযোগ চ্যাটে রাখুন", d: "সময়সূচি, ঠিকানা ও মূল্য পরিবর্তনের জন্য বুকিং চ্যাট ব্যবহার করুন যাতে সবকিছু লিপিবদ্ধ থাকে।" },
+          { t: "নিরাপদ ও পেশাদার থাকুন", d: "পরিচয়পত্র সাথে রাখুন, নিরাপত্তা নিয়ম মানুন এবং অনিরাপদ পরিস্থিতি বুকিং আইডিসহ সাপোর্টে জানান।" }
+        ],
+        cta: "ড্যাশবোর্ডে যান",
+        workerCta: "ড্যাশবোর্ডে যান"
       },
       help: {
         eyebrow: "সাহায্য দরকার",

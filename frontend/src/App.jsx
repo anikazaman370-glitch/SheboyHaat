@@ -3,7 +3,7 @@ import { api, refreshSession, getToken, setToken, setStoredUser } from "./api";
 import { Routes, Route, Link, NavLink, useNavigate, useLocation, useSearchParams, Navigate } from "react-router-dom";
 import { LangContext, translations, translateService, translateArea, localizeNumber, useLang } from "./i18n";
 
-const homeFor = (role) => role === "admin" ? "/admin" : role === "worker" ? "/worker-dashboard" : "/dashboard";
+const homeFor = (role) => role === "admin" ? "/admin" : role === "worker" ? "/worker-dashboard" : "/";
 
 const services = [
   { id:"plumbing", icon:"🔧", name:"Plumbing", bn:"প্লাম্বিং", desc:"Leaks, pipes, taps & bathroom repairs", descBn:"পানি লিক, পাইপ, কল ও বাথরুম মেরামত", price:"৳500+" },
@@ -94,7 +94,7 @@ function App(){
       <Route path="/settings" element={<RequireAuth user={user} ready={authReady}><Settings user={user} updateUser={login} logout={logout}/></RequireAuth>}/>
   <Route path="/spending" element={<RequireAuth user={user} ready={authReady}><Spending/></RequireAuth>}/>
       <Route path="/how-it-works" element={<HowItWorks/>}/>
-      <Route path="/notes" element={<ImportantNotes/>}/>
+      <Route path="/notes" element={<ImportantNotes user={user}/>}/>
       <Route path="/help" element={<NeedHelp/>}/>
       <Route path="*" element={<NotFound/>}/>
     </Routes>
@@ -837,7 +837,6 @@ function Dashboard({user,logout}){
         <div>
           <span className="eyebrow">{T.profile.eyebrow}</span>
           <h1>{T.profile.welcome} {user?.name||T.profile.titleFallback}</h1>
-          <p>{user?.email||T.profile.emailFallback}</p>
           <span className="role-pill">{roleLabel}</span>
         </div>
       </div>
@@ -859,14 +858,10 @@ function Dashboard({user,logout}){
         <div className="profile-actions"><Link to="/workers" className="btn btn-primary btn-sm">{T.profile.newBooking}</Link><Link to="/bookings" className="btn btn-outline btn-sm">{T.profile.viewAll}</Link></div>
       </section>
       <section className="panel">
-        <div className="panel-title"><h2>{T.profileInfo.details}</h2><Link to="/settings">{T.profileInfo.edit}</Link></div>
+        <div className="panel-title"><h2>{T.profile.settings}</h2><Link to="/profile">{T.profileInfo.edit}</Link></div>
         <div className="settings-row"><span>{T.profile.language}</span><LangToggle/></div>
-        <div className="settings-row"><span>{T.profile.email}</span><b>{user?.email||T.profile.emailFallback}</b></div>
-        {user?.phone&&<div className="settings-row"><span>{T.profile.phone}</span><b>{user.phone}</b></div>}
-        {user?.area&&<div className="settings-row"><span>{T.profile.area}</span><b>{translateArea(lang,user.area)}</b></div>}
         <div className="settings-row"><span>{T.profile.notifications}</span><b>{T.profile.enabled}</b></div>
-        {user?.role==="worker"&&<div className="settings-row"><span>{T.profile.verification}</span>{me?(me.verified?<span className="verified">{T.workerDash.nidVerified}</span>:me.rejected?<span className="rejected">✕ {T.workerDash.rejected}</span>:<span className="pending">⏳ {T.workerDash.nidPending}</span>):<b>…</b>}</div>}
-        {me?.rejected&&(me.rejectionReasonEn||me.rejectionReasonBn)&&<div className="reason-card"><h4>{T.workerDash.adminComment}</h4>{me.rejectionReasonEn&&<p><b>EN:</b> {me.rejectionReasonEn}</p>}{me.rejectionReasonBn&&<p><b>বাংলা:</b> {me.rejectionReasonBn}</p>}</div>}
+        <div className="settings-row"><span>{T.profileInfo.details}</span><Link to="/profile">{T.menu.profile}</Link></div>
         <button onClick={logout} className="btn btn-logout btn-lg full profile-logout"><LogoutIcon/> {T.profile.logout}</button>
       </section>
     </div>
@@ -907,13 +902,19 @@ function HowItWorks(){
   </div></main>
 }
 
-function ImportantNotes(){
+function ImportantNotes({user}){
   const {T}=useLang();
   const p=T.pages.notes;
+  const isWorker=user?.role==="worker";
+  const title=isWorker?p.workerTitle:p.title;
+  const text=isWorker?p.workerText:p.text;
+  const notes=isWorker?(p.workerNotes||p.notes):p.notes;
+  const cta=isWorker?(p.workerCta||p.cta):p.cta;
+  const ctaTo=isWorker?"/worker-dashboard":"/workers";
   return <main className="page"><div className="container narrow">
-    <div className="page-heading"><div><span className="eyebrow">{p.eyebrow}</span><h1>{p.title}</h1><p>{p.text}</p></div></div>
-    <div className="notes-grid">{p.notes.map((note,i)=><div className="note-card" key={i}><h3>{note.t}</h3><p>{note.d}</p></div>)}</div>
-    <div className="center info-cta"><Link to="/workers" className="btn btn-primary">{p.cta}</Link></div>
+    <div className="page-heading"><div><span className="eyebrow">{p.eyebrow}</span><h1>{title}</h1><p>{text}</p></div></div>
+    <div className="notes-grid">{notes.map((note,i)=><div className="note-card" key={i}><h3>{note.t}</h3><p>{note.d}</p></div>)}</div>
+    <div className="center info-cta"><Link to={ctaTo} className="btn btn-primary">{cta}</Link></div>
   </div></main>
 }
 
@@ -934,7 +935,6 @@ function Services(){const {T}=useLang();return <main className="page"><div class
 function ServicesDummy(){return null}
 
 export default App;
-
 
 
 
