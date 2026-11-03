@@ -235,7 +235,7 @@ The system shall allow a visitor to:
 
 ### FR-02: Registration
 
-The system shall allow a user to register as a customer or worker. Required common data includes name, email, password, and Bangladeshi phone number. Worker registration additionally requires service, area, experience, price, and an NID document.
+The system shall allow a user to register as a customer or worker. Required common data includes name, email, password, and Bangladeshi phone number. Worker registration additionally requires service, area, experience, and price. The worker may upload the NID during registration or from the worker dashboard within 14 days; the application remains hidden until the NID is submitted and approved.
 
 The backend validates the role, email, phone number, password length, duplicate email, and duplicate phone number. Passwords are stored as bcrypt hashes.
 
@@ -1023,6 +1023,17 @@ The implementation includes fixes and defensive behavior for the following issue
 | Long chat/review text could create excessive payloads | Added maximum lengths for messages and review comments |
 
 The project should still add automated regression tests for these cases.
+
+### Worker verification state separation
+
+Worker registration has two independent gates:
+
+1. **OTP/account verification:** `User.isVerified` becomes `true` after the worker enters the valid OTP. This allows the worker to maintain a legitimate login account.
+2. **NID/admin verification:** `Worker.verified` remains `false` until an administrator reviews the uploaded NID and approves the application. Only this second state makes the worker visible as a verified marketplace provider and eligible to receive bookings.
+
+The admin approval endpoint rejects approval when the worker account has not completed OTP verification. The worker API exposes both states as `accountVerified` and `verified`, so the dashboard cannot mistake OTP validation for NID approval. A verified worker receives `profileCompletion: 100`; pending or rejected applications do not receive the completed-profile state.
+
+Pending worker applications with no NID submission are cleaned up automatically after 14 days. The cleanup runs at backend startup and once per day. The period can be changed with `WORKER_NID_SUBMISSION_DAYS`. Workers can upload a missing NID from the dashboard; only applications with a submitted NID appear in the administrator's verification queue.
 
 ---
 

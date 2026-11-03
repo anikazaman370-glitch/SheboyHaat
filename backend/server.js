@@ -56,6 +56,7 @@ const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
 const OTP_TTL_MINUTES = Number(process.env.OTP_TTL_MINUTES || 5);
+const WORKER_NID_SUBMISSION_DAYS = Number(process.env.WORKER_NID_SUBMISSION_DAYS || 14);
 const MAIL_FROM = process.env.MAIL_FROM || 'SheboyHaat <no-reply@sheboyhaat.local>';
 const SMTP_READY = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
 const mailer = SMTP_READY ? nodemailer.createTransport({
@@ -317,6 +318,7 @@ function admin(req, res, next) { if (req.user?.role !== 'admin') return res.stat
 
 function workerOut(w, opts = {}) {
   const profileComplete = Boolean(
+    w.verified &&
     w.name &&
     w.service &&
     w.area &&
@@ -330,6 +332,8 @@ function workerOut(w, opts = {}) {
     id: w.id, userId: w.userId, name: w.name, service: w.service, area: w.area,
     rating: Number(w.rating), reviews: w.reviewCount, reviewCount: w.reviewCount, price: w.price, verified: !!w.verified,
     rejected: !!w.rejected,
+    accountVerified: opts.accountVerified ?? null,
+    verification: w.verified ? 'verified' : w.rejected ? 'rejected' : 'pending',
     profileComplete,
     profileCompletion: profileComplete ? 100 : 85,
     avatar: w.avatar || w.name.split(' ').map(x => x[0]).join('').slice(0, 2),
@@ -340,6 +344,7 @@ function workerOut(w, opts = {}) {
     out.experience = w.experience || '';
     out.bio = w.bio || '';
     out.earnings = Number(w.earnings) || 0;
+    out.hasNid = Boolean(w.nidData);
     out.rejectionReasonEn = w.rejectionReasonEn || '';
     out.rejectionReasonBn = w.rejectionReasonBn || '';
   }
@@ -350,6 +355,7 @@ function adminWorkerOut(w) {
   const out = {
     ...workerOut(w, { full: true }),
     email: w.user?.email || '',
+    accountVerified: !!w.user?.isVerified,
     nidFileName: w.nidFileName || ''
   };
   out.nidUrl = (isHttpUrl(raw) || isDataUrl(raw)) ? raw : '';
@@ -421,6 +427,31 @@ function amountToNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+async function removeExpiredWorkerApplications() {
+  const cutoff = new Date(Date.now() - WORKER_NID_SUBMISSION_DAYS * 24 * 60 * 60 * 1000);
+  const candidates = await prisma.worker.findMany({
+    where: { verified: false, rejected: false, nidData: '' },
+    include: { user: { select: { id: true, role: true, createdAt: true } } }
+  });
+  const expired = candidates.filter((worker) =>
+    worker.user?.role === 'worker' &&
+    worker.user.createdAt <= cutoff
+  );
+
+  for (const worker of expired) {
+    await prisma.$transaction(async (tx) => {
+      await tx.review.deleteMany({ where: { workerId: worker.id } });
+      await tx.message.deleteMany({ where: { senderId: worker.user.id } });
+      await tx.report.updateMany({ where: { reporterId: worker.user.id }, data: { reporterId: null } });
+      await tx.booking.updateMany({ where: { workerId: worker.id }, data: { workerId: null } });
+      await tx.refreshToken.deleteMany({ where: { userId: worker.user.id } });
+      await tx.worker.delete({ where: { id: worker.id } });
+      await tx.user.delete({ where: { id: worker.user.id } });
+    });
+    console.log(`Deleted worker application ${worker.id} after ${WORKER_NID_SUBMISSION_DAYS} days without an NID submission.`);
+  }
+}
+
 app.get('/api/health', (_q, r) => r.json({ ok: true, service: 'SheboyHaat API', database: 'PostgreSQL', cloudinary: CLOUDINARY_READY }));
 
 app.get('/api/services', (_q, r) => r.json({ services: [{ id: 'plumbing', name: 'Plumbing' }, { id: 'electrical', name: 'Electrical' }, { id: 'cleaning', name: 'Cleaning' }, { id: 'ac', name: 'AC Service' }, { id: 'appliance', name: 'Appliance Repair' }, { id: 'painting', name: 'Painting' }] }));
@@ -436,9 +467,12 @@ app.get('/api/workers', optionalAuth, ah(async (q, r) => {
 }));
 
 app.get('/api/workers/me', auth, ah(async (q, r) => {
-  const w = await prisma.worker.findFirst({ where: { userId: q.user.id } });
+  const w = await prisma.worker.findFirst({
+    where: { userId: q.user.id },
+    include: { user: { select: { isVerified: true } } }
+  });
   if (!w) return r.status(404).json({ message: 'No worker profile is linked to this account.' });
-  r.json({ worker: workerOut(w, { full: true }) });
+  r.json({ worker: workerOut(w, { full: true, accountVerified: !!w.user?.isVerified }) });
 }));
 
 app.post('/api/workers/me/resubmit', auth, ah(async (q, r) => {
@@ -494,7 +528,7 @@ app.post('/api/auth/register', ah(async (q, r) => {
   if (!isValidBdPhone(phone)) return r.status(400).json({ message: 'Enter a valid Bangladeshi phone number, e.g. 01712345678.' });
   const normalizedPhone = normalizePhone(phone);
   if (!normalizedPhone) return r.status(400).json({ message: 'A valid phone number is required.' });
-  if (role === 'worker' && (!service || !area || !nidFileName || !nidData)) return r.status(400).json({ message: 'Worker service, area and NID upload are required.' });
+  if (role === 'worker' && (!service || !area)) return r.status(400).json({ message: 'Worker service and area are required.' });
   const normalized = String(email).trim().toLowerCase();
   const existing = await prisma.user.findUnique({ where: { email: normalized } });
   if (existing?.isVerified) return r.status(409).json({ message: 'Email already registered.' });
@@ -780,7 +814,7 @@ app.post('/api/bookings/:code/messages', auth, ah(async (q, r) => {
 app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
   const [workers, pendingVerification, bookings, openReports] = await Promise.all([
     prisma.worker.count(),
-    prisma.worker.count({ where: { verified: false, rejected: false } }),
+    prisma.worker.count({ where: { verified: false, rejected: false, nidData: { not: '' } } }),
     prisma.booking.count(),
     prisma.report.count({ where: { status: 'Open' } })
   ]);
@@ -790,14 +824,21 @@ app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
 app.get('/api/admin/workers', auth, admin, ah(async (_q, r) => {
   const workers = await prisma.worker.findMany({
     orderBy: [{ verified: 'asc' }, { id: 'desc' }],
-    include: { user: { select: { email: true } } }
+    include: { user: { select: { email: true, isVerified: true } } }
   });
   r.json({ workers: workers.map(adminWorkerOut) });
 }));
 
 app.patch('/api/admin/workers/:id/verify', auth, admin, ah(async (q, r) => {
   const id = Number(q.params.id);
-  if (!await prisma.worker.findUnique({ where: { id } })) return r.status(404).json({ message: 'Worker not found.' });
+  const worker = await prisma.worker.findUnique({
+    where: { id },
+    include: { user: { select: { isVerified: true } } }
+  });
+  if (!worker) return r.status(404).json({ message: 'Worker not found.' });
+  if (!worker.user?.isVerified) {
+    return r.status(409).json({ message: 'Worker must complete OTP verification before NID approval.' });
+  }
   await prisma.worker.update({ where: { id }, data: { verified: true, rejected: false, rejectionReasonEn: '', rejectionReasonBn: '' } });
   r.json({ message: 'Worker verified.' });
 }));
@@ -839,5 +880,16 @@ app.get('/api/admin/reports', auth, admin, ah(async (_q, r) => {
 app.use((err, _q, r, _n) => { console.error(err); r.status(500).json({ message: 'Unexpected server error.' }); });
 
 prisma.$connect()
-  .then(() => app.listen(PORT, () => console.log(`SheboyHaat API: http://localhost:${PORT}\nDatabase: PostgreSQL via Prisma`)))
+  .then(async () => {
+    await removeExpiredWorkerApplications().catch((error) => {
+      console.error('Could not clean up expired worker applications:', error);
+    });
+    const cleanupTimer = setInterval(() => {
+      removeExpiredWorkerApplications().catch((error) => {
+        console.error('Could not clean up expired worker applications:', error);
+      });
+    }, 24 * 60 * 60 * 1000);
+    cleanupTimer.unref?.();
+    app.listen(PORT, () => console.log(`SheboyHaat API: http://localhost:${PORT}\nDatabase: PostgreSQL via Prisma`));
+  })
   .catch((e) => { console.error('Could not connect to the database. Check DATABASE_URL in backend/.env', e); process.exit(1); });
