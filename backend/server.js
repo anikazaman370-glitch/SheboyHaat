@@ -316,10 +316,22 @@ async function startSession(user, res, status = 200) {
 function admin(req, res, next) { if (req.user?.role !== 'admin') return res.status(403).json({ message: 'Admin access required.' }); next(); }
 
 function workerOut(w, opts = {}) {
+  const profileComplete = Boolean(
+    w.name &&
+    w.service &&
+    w.area &&
+    w.phone &&
+    w.experience !== '' &&
+    w.price &&
+    w.nidFileName &&
+    w.nidData
+  );
   const out = {
     id: w.id, userId: w.userId, name: w.name, service: w.service, area: w.area,
     rating: Number(w.rating), reviews: w.reviewCount, reviewCount: w.reviewCount, price: w.price, verified: !!w.verified,
     rejected: !!w.rejected,
+    profileComplete,
+    profileCompletion: profileComplete ? 100 : 85,
     avatar: w.avatar || w.name.split(' ').map(x => x[0]).join('').slice(0, 2),
     jobs: w.jobs
   };
@@ -335,7 +347,11 @@ function workerOut(w, opts = {}) {
 }
 function adminWorkerOut(w) {
   const raw = String(w.nidData || '');
-  const out = { ...workerOut(w, { full: true }), nidFileName: w.nidFileName || '' };
+  const out = {
+    ...workerOut(w, { full: true }),
+    email: w.user?.email || '',
+    nidFileName: w.nidFileName || ''
+  };
   out.nidUrl = (isHttpUrl(raw) || isDataUrl(raw)) ? raw : '';
   out.hasNid = Boolean(raw);
   return out;
@@ -772,7 +788,10 @@ app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
 }));
 
 app.get('/api/admin/workers', auth, admin, ah(async (_q, r) => {
-  const workers = await prisma.worker.findMany({ orderBy: [{ verified: 'asc' }, { id: 'desc' }] });
+  const workers = await prisma.worker.findMany({
+    orderBy: [{ verified: 'asc' }, { id: 'desc' }],
+    include: { user: { select: { email: true } } }
+  });
   r.json({ workers: workers.map(adminWorkerOut) });
 }));
 
