@@ -1035,6 +1035,8 @@ The admin approval endpoint rejects approval when the worker account has not com
 
 Pending worker applications with no NID submission are cleaned up automatically after 14 days. The cleanup runs at backend startup and once per day. The period can be changed with `WORKER_NID_SUBMISSION_DAYS`. Workers can upload a missing NID from the dashboard; only applications with a submitted NID appear in the administrator's verification queue.
 
+The admin worker endpoint also removes orphaned worker profiles whose linked user account no longer exists. This prevents manually deleted users from appearing as nameless entries in the rejected-worker section; related reviews are removed and booking references are cleared before the worker profile is deleted.
+
 ---
 
 # 7. Results and Discussion

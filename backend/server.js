@@ -362,6 +362,23 @@ function adminWorkerOut(w) {
   out.hasNid = Boolean(raw);
   return out;
 }
+
+async function removeOrphanedWorkers() {
+  const orphanedWorkers = await prisma.worker.findMany({
+    where: { user: null },
+    select: { id: true }
+  });
+  if (!orphanedWorkers.length) return 0;
+
+  await prisma.$transaction(async (tx) => {
+    for (const worker of orphanedWorkers) {
+      await tx.booking.updateMany({ where: { workerId: worker.id }, data: { workerId: null } });
+      await tx.review.deleteMany({ where: { workerId: worker.id } });
+      await tx.worker.delete({ where: { id: worker.id } });
+    }
+  });
+  return orphanedWorkers.length;
+}
 const isDataUrl = (v) => /^data:/i.test(String(v || ''));
 const isHttpUrl = (v) => /^https?:\/\//i.test(String(v || ''));
 const MIME_EXT = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/bmp': 'bmp', 'application/pdf': 'pdf' };
@@ -813,8 +830,8 @@ app.post('/api/bookings/:code/messages', auth, ah(async (q, r) => {
 
 app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
   const [workers, pendingVerification, bookings, openReports] = await Promise.all([
-    prisma.worker.count(),
-    prisma.worker.count({ where: { verified: false, rejected: false, nidData: { not: '' } } }),
+    prisma.worker.count({ where: { user: { isNot: null } } }),
+    prisma.worker.count({ where: { user: { isNot: null }, verified: false, rejected: false, nidData: { not: '' } } }),
     prisma.booking.count(),
     prisma.report.count({ where: { status: 'Open' } })
   ]);
@@ -822,6 +839,7 @@ app.get('/api/admin/overview', auth, admin, ah(async (_q, r) => {
 }));
 
 app.get('/api/admin/workers', auth, admin, ah(async (_q, r) => {
+  await removeOrphanedWorkers();
   const workers = await prisma.worker.findMany({
     orderBy: [{ verified: 'asc' }, { id: 'desc' }],
     include: { user: { select: { email: true, isVerified: true } } }
