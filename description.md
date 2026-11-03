@@ -471,6 +471,20 @@ flowchart LR
     S -. optional .-> C[Cloudinary NID storage]
 ```
 
+### Architecture components and responsibilities
+
+1. **Browser and users:** Customers, workers, and administrators use the responsive browser interface. The browser sends the access token with API requests and includes the refresh cookie when a session needs renewal.
+2. **React SPA:** React renders the public pages, authentication screens, customer dashboard, worker dashboard, profile pages, bookings, chat, and admin panel. React Router changes screens without full page reloads, while component state reflects API results such as verification badges and booking statuses.
+3. **API helper:** `frontend/src/api.js` is the client gateway. It adds the configured API URL, bearer token, cookies, JSON parsing, consistent error handling, and one refresh-token retry for expired access tokens.
+4. **Express API:** The Node.js server exposes REST endpoints for authentication, OTP, workers, bookings, reviews, messages, reports, profiles, and administration. It returns JSON responses consumed by React.
+5. **Security middleware:** JWT middleware identifies the current user, and role middleware protects administrator routes. Route-level checks ensure that users can access only their own data and permitted booking conversations.
+6. **Business rules:** The backend validates inputs and enforces the domain rules: OTP must be valid and unexpired; workers need both OTP verification and administrator NID approval; only approved workers are public and bookable; booking status changes follow the service lifecycle; and reviews belong to completed bookings.
+7. **Prisma:** Prisma maps application models to PostgreSQL, parameterizes queries, manages relationships, and supports transactions for operations such as removing expired or orphaned worker data.
+8. **PostgreSQL:** PostgreSQL stores users, worker profiles, bookings, reviews, reports, messages, refresh tokens, and OTP metadata. Unique constraints and foreign keys protect identity and relationship integrity.
+9. **External services:** SMTP sends email OTPs, optional SMS/Twilio integrations support future phone delivery, and Cloudinary stores worker NID documents. A development fallback can store NID data locally when Cloudinary is not configured.
+
+This separation means that the user interface, API transport, business rules, database access, and external services can evolve independently. For example, changing the SMTP provider does not require changing the OTP screen.
+
 ### Request flow
 
 1. The browser renders a React route.
@@ -530,36 +544,107 @@ flowchart TB
     Admin --> Chat
 ```
 
+### Use-case descriptions
+
+#### Customer use cases
+
+- **Register, verify OTP, and log in:** The customer creates an account, receives a time-limited email OTP, verifies it, and receives an authenticated session.
+- **Browse and search:** The customer views service categories and public worker profiles. Only NID-approved workers are shown as verified providers.
+- **Create a booking:** The customer selects a worker, enters the date, time, address, and note, and submits a request. The server validates the data and creates a `Requested` booking.
+- **Track and communicate:** The customer follows status changes, views booking details, and exchanges messages within the booking conversation.
+- **Confirm, review, and report:** After service completion, the customer confirms the booking, submits a rating/review, or reports a problem.
+- **Manage profile:** The customer views or updates personal information and manages the authenticated session.
+
+#### Worker use cases
+
+- **Apply as a worker:** The worker registers with service, area, experience, price, phone, and account details. NID upload can occur during registration or from the dashboard.
+- **Complete two verification gates:** OTP verification proves ownership of the login account. Administrator NID approval controls marketplace visibility; OTP alone never makes the worker public.
+- **Resubmit after rejection:** The worker reads the administrator's English and Bangla explanation, corrects the information, uploads a new NID if needed, and resubmits.
+- **Manage jobs:** An approved worker sees booking requests, accepts suitable work, communicates with customers, and marks completed work as done.
+- **View earnings and profile:** The worker views earnings, reviews, verification status, profile completion, and account details.
+
+#### Administrator use cases
+
+- **Authenticate and authorize:** The administrator enters a protected admin area through the common authentication system but receives administrator-only permissions.
+- **Review applications:** The administrator sees submitted worker information, OTP status, profile completion, and the NID document. Applications without an NID are not placed in the review queue.
+- **Approve or reject:** Approval requires OTP verification and sets `Worker.verified` to true. Rejection stores English and Bangla explanations that are displayed to the worker.
+- **Monitor the platform:** The administrator views counts, bookings, reports, and database records.
+- **Maintain data consistency:** Orphaned worker profiles whose user account was manually deleted are removed before the admin worker list is returned, preventing stale rejected entries.
+
 ## 4.3 Activity Diagram / Flowchart
 
-**Figure 4.3: Customer booking activity**
+**Figure 4.3: Complete SheboyHaat platform flow**
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> Browse[Open services or workers]
-    Browse --> Auth{Authenticated?}
-    Auth -- No --> Limited[Show limited verified-worker cards]
-    Limited --> Login[Register or login]
-    Auth -- Yes --> Search[Search/filter worker]
-    Login --> Search
-    Search --> Profile[Open worker profile]
-    Profile --> Form[Enter date, time, address, note]
-    Form --> Submit[Submit booking]
-    Submit --> Valid{Input and worker valid?}
-    Valid -- No --> Error[Show validation/API error]
-    Error --> Form
-    Valid -- Yes --> Requested[Booking = Requested]
-    Requested --> WorkerDecision{Worker decision}
-    WorkerDecision -- Accept --> Accepted[Booking = Accepted]
-    WorkerDecision -- Cancel --> Cancelled[Booking = Cancelled]
-    Accepted --> Work[Worker performs service]
-    Work --> WorkDone[Worker = Work Done]
-    WorkDone --> Complete[Customer confirms completion]
-    Complete --> Completed[Booking = Completed]
-    Completed --> Rating[Customer submits 1-5 rating/review]
-    Rating --> End([End])
+    Start([Visitor opens SheboyHaat]) --> Public[Browse home page, services, and verified workers]
+    Public --> Account{Needs an account?}
+    Account -- No --> Public
+    Account -- Yes --> Role{Choose customer or worker}
+    Role --> Register[Submit registration details]
+    Register --> RegisterValid{Input valid and email available?}
+    RegisterValid -- No --> RegisterError[Show validation or duplicate-account error]
+    RegisterError --> Register
+    RegisterValid -- Yes --> Create[Create unverified User account]
+    Create --> OTP[Issue hashed, time-limited OTP and send email]
+    OTP --> OTPCheck{OTP correct and unexpired?}
+    OTPCheck -- No --> OTPError[Show error or allow resend]
+    OTPError --> OTP
+    OTPCheck -- Yes --> AccountVerified[Set User.isVerified = true and create session]
+    AccountVerified --> AccountRole{Account role}
+    AccountRole -- Customer --> Search[Search/filter verified workers]
+    Search --> CustomerProfile[View worker profile]
+    CustomerProfile --> BookForm[Enter date, time, address, and service note]
+    BookForm --> BookValid{Worker and booking data valid?}
+    BookValid -- No --> BookError[Show validation/API error]
+    BookError --> BookForm
+    BookValid -- Yes --> Requested[Create booking: Requested]
+    AccountRole -- Worker --> NidCheck{NID uploaded?}
+    NidCheck -- No --> NidReminder[Show dashboard upload form]
+    NidReminder --> Deadline{Submitted within 14 days?}
+    Deadline -- No --> DeleteWorker[Delete expired worker account and related records]
+    DeleteWorker --> End([End])
+    Deadline -- Yes --> UploadNid[Upload NID to Cloudinary or fallback]
+    NidCheck -- Yes --> UploadNid
+    UploadNid --> Pending[Worker.verified remains false; profile hidden]
+    Pending --> AdminReview[Administrator reviews details, OTP state, and NID]
+    AdminReview --> AdminDecision{Approve or reject?}
+    AdminDecision -- Reject --> Rejected[Store rejection messages in English/Bangla]
+    Rejected --> Resubmit[Worker reads reason, corrects details, and resubmits]
+    Resubmit --> UploadNid
+    AdminDecision -- Approve --> Verified[Set Worker.verified true; completion = 100%]
+    Verified --> Search
+    Requested --> WorkerRequest[Show request to selected worker]
+    WorkerRequest --> WorkerDecision{Worker accepts?}
+    WorkerDecision -- No --> Cancelled[Booking = Cancelled]
+    WorkerDecision -- Yes --> Accepted[Booking = Accepted]
+    Accepted --> Chat[Customer and worker chat within booking]
+    Chat --> Service[Worker performs requested service]
+    Service --> WorkDone[Worker marks booking: Work Done]
+    WorkDone --> Confirm{Customer confirms completion?}
+    Confirm -- No --> FollowUp[Keep active or resolve issue]
+    FollowUp --> Chat
+    Confirm -- Yes --> Completed[Booking = Completed]
+    Completed --> Review[Customer submits rating and review]
+    Review --> Report{Problem to report?}
+    Report -- Yes --> SubmitReport[Submit report for administrator]
+    Report -- No --> End
+    SubmitReport --> AdminMonitor[Administrator reviews report and platform data]
+    AdminMonitor --> End
     Cancelled --> End
 ```
+
+### Detailed end-to-end flow
+
+1. **Public discovery:** Visitors can inspect the public interface and verified worker listings. OTP-verified but NID-pending workers remain hidden and cannot receive bookings.
+2. **Account creation:** The visitor selects a role and submits the form. The backend validates input, normalizes the phone number, checks email and phone uniqueness, hashes the password, creates the user, and creates a worker profile for worker accounts.
+3. **OTP verification:** The backend generates a six-digit OTP, stores its hash and expiration, and sends it through SMTP when configured. A correct code sets `User.isVerified` to true and establishes a session. This gate applies to both customers and workers.
+4. **Worker onboarding:** A worker submits the NID during registration or from the dashboard. Until it is submitted, the profile remains hidden and is not placed in the admin queue. Missing NID submissions are cleaned up after 14 days.
+5. **Administrative moderation:** The administrator examines worker details and the NID. Approval requires OTP completion and sets `Worker.verified` to true. Rejection stores the explanation and allows correction and resubmission.
+6. **Booking:** After approval, a customer selects the worker and submits a validated request. The booking starts as `Requested` and references both parties.
+7. **Service execution:** The worker accepts the request, changing it to `Accepted`. The participants can chat, the worker performs the service, and then marks it `Work Done`.
+8. **Completion and feedback:** The customer confirms completion, changing the booking to `Completed`, and can submit a rating and review.
+9. **Support and administration:** Participants can submit reports. Administrators monitor reports, bookings, users, and worker records. Cleanup and deletion logic remove dependent data safely and prevent stale moderation entries.
 
 ### Authentication activity
 
