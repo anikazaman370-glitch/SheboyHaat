@@ -750,4 +750,3 @@ Suggested next steps:
 
 Software Development-I (SDP I) lab project: "SheboyHaat — A Trust-Based Booking Platform for Local Home-Service Workers".
 
-If you change the setup steps, environment variables, routes or API, update this README in the same commit so it stays the single source of truth.
